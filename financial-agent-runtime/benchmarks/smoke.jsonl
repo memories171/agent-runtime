@@ -1,0 +1,2 @@
+{"task_id":"echo-smoke-001","prompt":"请原样回显：quarterly revenue review","expected_contains":["quarterly revenue review"],"tags":["tool-use","smoke"]}
+{"task_id":"echo-smoke-002","prompt":"请处理文本：customer retention analysis","expected_contains":["customer retention analysis"],"tags":["tool-use","smoke"]}

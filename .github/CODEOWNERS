@@ -1,0 +1,8 @@
+# Minimum CODEOWNERS. Replace @OWNER placeholders with real GitHub handles
+# before enabling branch protection (HUMAN/ORG step).
+*                                   @OWNER-PLATFORM
+financial-agent-runtime/src/         @OWNER-BACKEND
+financial-agent-runtime/migrations/  @OWNER-BACKEND @OWNER-DBA
+financial-agent-runtime/docs/governance/ @OWNER-COMPLIANCE
+finora-frontend/src/auth/            @OWNER-FRONTEND @OWNER-SECURITY
+.github/workflows/                   @OWNER-PLATFORM

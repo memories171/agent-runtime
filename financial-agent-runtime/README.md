@@ -1,0 +1,261 @@
+# 金融 Agent Runtime（Financial Agent Runtime）
+
+这是一个面向金融机构内部研究、运营和合规辅助场景的 Agent Runtime MVP。底层保留 Temporal Durable Execution、MCP、Skills、长期记忆、多租户隔离与 Benchmark；上层增加金融数据模型、交易复核提示、KYC/AML 辅助 Skills、内部案件流转和双人审批。
+
+> **边界声明：** 本项目是开发和架构验证样例，不是银行核心系统、经验证的 AML 监测系统或投资顾问产品。所有金融演示数据均为虚构数据。系统只提供资料整理、可解释规则提示和内部案件草稿，不会下单、转账、放贷、冻结账户、提交 SAR/STR 或作出最终 KYC/AML/信用决策。上线前必须由法务、合规、信息安全和业务风险团队完成验证与审批。
+
+## 一、当前包含的能力
+
+### 通用 Runtime
+- **持久化执行：** Temporal Workflow / Activity / Signal，支持长任务、暂停、恢复、取消和审批等待。
+- **Run API：** 创建、查询 Run 和事件，提交用户输入、审批、暂停、恢复与取消。
+- **Transactional Outbox：** Run 和 Workflow 派发意图在同一数据库事务中提交。
+- **Durable Checkpoint（schema v2）：** 完整 `CheckpointEnvelope` 保存 Plan / Context / Execution / Budget 状态快照；经规范化序列化 → zlib 压缩 → AES-256-GCM 加密 → SHA-256 Digest → 对象存储，PostgreSQL 只保存元数据与对象引用。默认使用 `SNAPSHOT_STORAGE_BACKEND=local` + 持久化卷；生产可切换 `s3`（兼容 MinIO）。生产环境必须配置 `SNAPSHOT_ENCRYPTION_KEYS`（base64 32 字节 keyring）与 `SNAPSHOT_ENCRYPTION_KEY_ID`。恢复前校验 Digest 完整性、Schema Version、Tenant 与 ACL；损坏或不完整快照被拒绝读取。相同 `(run_id, checkpoint_sequence)` 幂等保护，对象上传与数据库提交失败会清理孤立对象。
+- **Tool Gateway：** JSON Schema 校验、Scope 权限、风险等级、幂等调用日志。
+- **Reliable Pause / Resume + Approval Binding：** Pause/Resume 通过扩展的 `WorkflowOutbox`（`PAUSE_WORKFLOW`/`RESUME_WORKFLOW`/`APPROVAL_DECISION`）可靠派发，审批状态更新与命令记录同事务；`command_id` 稳定，至少一次投递由 Workflow 去重。RunRecord 用 `version` 乐观锁 + 独立 `pause_state`（NONE/REQUESTED/PAUSING/PAUSED/RESUME_REQUESTED/RESUMING）控制并发，RunStatus 不变。Approval Action Envelope 绑定 Tenant/Run/ToolCall/ToolName/资源/参数 Hash/Policy，状态机 PENDING→APPROVED→CONSUMED（旁路 REJECTED/EXPIRED/REVOKED/INVALIDATED），执行前重验、成功后原子消费，请求人不能自审。Workflow 审批等待用 `wait_condition` 持久化等待，不阻塞 Worker。
+- **Durable Recovery（schema v2）：** Tool Invocation Journal 采用稳定幂等键 `sha256(tenant_id:run_id:tool_call_id)`（不含 retry/attempt），状态机 `CREATED→DISPATCHED→CONFIRMED | FAILED | UNKNOWN→RECONCILIATION_REQUIRED`。明确失败转 FAILED 可重试，结果未知转 UNKNOWN 且禁止盲重试。Lease + 递增 Fencing Token（Temporal Activity attempt）保证旧 Worker 迟到写入被条件更新拒绝。幂等 Provider 崩溃后可安全重派，非幂等 Provider 一律 fail-closed。Worker 重启时扫描运行中的任务记录 `WORKER_FAILED→TEMPORAL_HISTORY_REPLAY→WORKER_RECONNECTED→WORKFLOW_RESUMED` 审计事件并复验用户租户成员资格——恢复完全由 Temporal History 驱动，不新建 Workflow、不从 Checkpoint 手动执行 step。
+- **MCP：** 官方 MCP Python SDK v2 Client，Streamable HTTP；只暴露明确 Allowlist 的工具。
+- **Skills：** 文件注册表和按需加载。
+- **Memory：** 用户、团队、组织范围记忆及 ACL 过滤的关键词检索。
+- **Benchmark：** 通用 Model × Harness 冒烟测试基础 Runner。
+
+### 金融领域模块
+- **金融数据模型：** 客户、账户、交易、内部复核案件和金融审计记录。
+- **金融只读工具：** 客户资料、账户摘要、交易明细查询，所有数据访问强制带可信 Tenant 上下文，并进一步检查用户到客户/账户/交易资源的 Resource Grant。
+- **交易监测提示：** 演示规则识别短时借记频次和重复交易参考号，输出命中交易 ID 与解释。
+- **内部案件创建：** KYC / AML / 交易复核案件；需要高风险审批，并强制由不同于 Run 发起人的用户审批。
+- **金融 Skills：** 财报研究、交易监测、KYC 资料完整性辅助、财务对账、信用风险辅助分析。
+- **金融 Benchmark：** 合成交易数据集，对演示监测规则计算 Accuracy、Precision、Recall、F1。
+
+## 二、快速启动
+
+环境要求：Docker Compose、Python 3.11+（推荐 3.12）。
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+服务地址：
+- Runtime API：http://localhost:8000/docs
+- Temporal UI：http://localhost:8233
+- 健康检查：http://localhost:8000/health
+
+Compose 中的 Temporal 使用开发服务器，不可直接用于生产。生产环境应使用 Temporal Cloud 或配置持久化、备份、TLS 和高可用的自建集群。
+
+如从此前通用版 MVP 升级，金融数据表会由 `create_all` 新建；本项目仍未提供生产 Alembic 迁移。若本地旧开发数据库遇到表结构不一致，确认没有需要保留的数据后可执行 `docker compose down -v` 再启动（这会删除本地 PostgreSQL 开发卷）；生产数据库禁止这样处理，必须走经审核的迁移。
+
+## 三、初始化虚构金融数据
+
+在项目根目录执行：
+
+```bash
+# 若已使用 Docker Compose 启动服务
+ docker compose exec api python scripts/seed_financial_demo.py
+```
+
+或在本地 Python 环境安装项目后执行：
+
+```bash
+python scripts/seed_financial_demo.py
+```
+
+样例租户：
+- `demo-bank`：包含两名虚构客户、两个账户和示例交易，并为 `analyst-01`、`compliance-01` 写入范围化 Resource Grant。`analyst-01` 可读及创建案件，`compliance-01` 可读及审批案件。
+- `other-bank`：包含另一租户客户和账户，并为 `analyst-02` 写入独立授权，用于验证跨租户隔离。
+
+所有账户号码均为掩码展示。金额存为最小货币单位整数，例如 USD cents、JPY yen；调用方必须结合 `currency` 解释金额，不要将不同币种金额直接相加。
+
+## 四、调用金融工具
+
+开发环境 Header 身份仅在 `APP_ENV=development` 且 `AUTH_MODE=dev` 时允许，并会记录明显安全日志；生产环境必须设置 `AUTH_MODE=oidc`，验证 JWT 签名、Issuer、Audience、`exp`、`nbf` 与算法 allowlist，JWKS 支持 Key Rotation。Scope 由数据库 RBAC 解析，权限第一层之后仍需 Resource Grant/ABAC。以下是 `analyst-01` 的金融演示 Scope：
+
+```bash
+SCOPES='agent:execute,financial:customer:read,financial:account:read,financial:transactions:read,financial:monitoring:run,financial:case:create,financial:case:read,financial:audit:read,memory:read,memory:write'
+```
+
+### 企业级身份认证与权限隔离
+
+本次已实现统一 `Principal`（含 `organization_id/roles/permissions/authentication_method/token_expires_at`）、OIDC/JWT 验证、数据库驱动 RBAC（`tenants/organizations/users/tenant_memberships/roles/permissions/role_permissions/user_roles`）、ABAC 默认拒绝、Resource ACL、认证审计与 PostgreSQL RLS。
+
+- 生产模式缺少 `OIDC_ISSUER/OIDC_AUDIENCE/OIDC_JWKS_URL` 时启动失败。
+- `X-Tenant-ID` 只作为当前租户选择参数；服务端必须验证用户属于该 Tenant。
+- 所有租户表启用 `ROW LEVEL SECURITY` 和 `FORCE ROW LEVEL SECURITY`；应用使用非超级用户 `agent_app`。
+- `X-Scopes` / `X-User-ID` 在生产环境完全不被信任。
+- 新增 API：`GET /api/v1/auth/me`、`GET /api/v1/auth/tenants`、`POST /api/v1/auth/switch-tenant`、`GET /api/v1/auth/permissions`、`GET /api/v1/admin/users`、`/roles`、`/permissions`、`/audit-logs`。
+
+迁移与验证命令：
+
+```bash
+alembic upgrade head
+pytest -q tests/test_auth_jwt.py tests/test_rbac_abac.py tests/test_api_auth.py
+TEST_DATABASE_URL=postgresql+asyncpg://agent_app:agent_app@localhost:5433/agent_runtime pytest -q tests/test_rls_postgres.py tests/test_tenant_isolation.py
+```
+
+真实 PostgreSQL RLS 测试必须使用非超级用户账号；未设置 `TEST_DATABASE_URL` 时相关测试会跳过，不能用 Mock 结果替代。
+
+#### 新增租户账号
+
+以后新增账号必须使用标准脚本，避免只建 Keycloak 用户却漏掉数据库成员关系或角色，导致登录后被授权拒绝：
+
+```bash
+python scripts/seed_tenant_user.py \
+  --tenant-id tenant-c --tenant-name "Tenant C" \
+  --org-id org-c --org-name "Org C" \
+  --user-id user-c --password 'UserC@2026' \
+  --role read_only_user
+```
+
+脚本会同时更新 `docker/keycloak/finora-realm.json`、重建 Keycloak realm，并在 PostgreSQL 中写入 tenant / organization / user / membership / role。重建 realm 会使现有浏览器会话失效，用户需要重新登录。
+
+可用角色：`tenant_admin`、`analyst`、`compliance_officer`、`auditor`、`read_only_user`。
+
+创建一个交易复核 Run。未配置模型服务时，Demo Planner 仍可通过“金融监测演示”这一明确测试短语调用只读交易筛查工具：
+
+```bash
+curl -X POST http://localhost:8000/runs \
+  -H 'Content-Type: application/json' \
+  -H 'X-Tenant-ID: demo-bank' \
+  -H 'X-User-ID: analyst-01' \
+  -H "X-Scopes: $SCOPES" \
+  -d '{"prompt":"金融监测演示：请对账户 ACC-DEMO-001 运行 financial.screen_transactions，并解释命中记录；不要将提示描述为洗钱结论。","skill_ids":["transaction-monitoring"]}'
+```
+
+可用金融工具：
+
+| 工具 | 作用 | 权限/风险 |
+|---|---|---|
+| `financial.get_customer_profile` | 查询当前租户客户 ID、类型、国家/地区和 KYC 状态（默认不返回姓名等直接标识信息） | `financial:customer:read` |
+| `financial.get_account_summary` | 查询掩码账户、币种、余额和状态 | `financial:account:read` |
+| `financial.list_transactions` | 查询账户交易明细 | `financial:transactions:read` |
+| `financial.screen_transactions` | 运行最近 30 天、最多 5,000 笔的演示复核规则（可调回溯期） | `financial:transactions:read` + `financial:monitoring:run` |
+| `financial.create_review_case` | 创建内部复核案件 | 高风险，需要独立审批人和 `financial:case:create` |
+
+查看已创建案件：
+
+```bash
+curl 'http://localhost:8000/finance/review-cases?status=OPEN' \
+  -H 'X-Tenant-ID: demo-bank' -H 'X-User-ID: compliance-01' \
+  -H "X-Scopes: agent:execute,financial:case:read"
+```
+
+
+查看金融审计日志（仅当前租户，需 `financial:audit:read`）：
+
+```bash
+curl 'http://localhost:8000/finance/audit-logs?limit=100' \
+  -H 'X-Tenant-ID: demo-bank' -H 'X-User-ID: auditor-01' \
+  -H 'X-Scopes: agent:execute,financial:audit:read'
+```
+
+### 双人复核
+
+`financial.create_review_case` 被标记为 high risk。审批接口会检查：
+1. 审批人不是创建 Run 的用户；
+2. 审批人拥有 `approval:approve`；
+3. 审批人额外拥有 `financial:case:approve`；
+4. 审批人对案件主体具有 `case:approve` Resource Grant。
+
+审批接口示例（由不同用户 `compliance-01` 提交）：
+
+```bash
+curl -X POST http://localhost:8000/runs/<RUN_ID>/approval \
+  -H 'Content-Type: application/json' \
+  -H 'X-Tenant-ID: demo-bank' -H 'X-User-ID: compliance-01' \
+  -H 'X-Scopes: agent:execute,approval:approve,financial:case:approve' \
+  -d '{"approved":true,"reason":"已完成独立复核"}'
+```
+
+审批绑定仍需要在正式上线前进一步加强：参数规范化哈希、一次性 Nonce、审批有效期、策略版本和不可变 Action Envelope。当前实现是 MVP 的职责分离起点，不可视为完整电子签名或金融授权系统。
+
+## 五、金融 Skills
+
+目录 `skills/` 中包含：
+- `financial-research`：财报与市场研究，强调来源、期间、币种和口径。
+- `transaction-monitoring`：交易复核提示和证据整理。
+- `kyc-review`：KYC 文件完整性辅助检查。
+- `financial-reconciliation`：财务对账和差异调查。
+- `credit-risk-review`：信用风险资料和比率辅助分析。
+
+Skills 是模型执行指引，不是权限凭证。真正的访问控制始终由 Tool Gateway 和数据层执行。
+
+## 六、金融 Benchmark
+
+运行演示交易监测规则 Benchmark：
+
+```bash
+python scripts/run_finance_benchmark.py \
+  --dataset benchmarks/financial/transaction_screening.jsonl \
+  --output financial-benchmark-results.json
+```
+
+输出包括 Accuracy、Precision、Recall、F1、TP/FP/TN/FN 和逐任务结果。数据集完全合成，当前只验证两条演示规则的行为，不代表 AML 模型有效性、监管合规性或真实业务表现。正式金融 Benchmark 还应加入经合规确认的标注样本、时间外验证、群体偏差评估、误报成本、漏报成本、阈值稳定性、可解释性和独立模型风险验证。
+
+原有 Model × Harness Runner 仍可使用：
+
+```bash
+python scripts/run_benchmark.py \
+  --dataset benchmarks/smoke.jsonl \
+  --deployments '{"baseline":"http://localhost:8000","harness-v2":"http://localhost:8100"}' \
+  --models model-a,model-b \
+  --output benchmark-results.json
+```
+
+## 七、测试
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e '.[test]'
+pytest -q
+```
+
+金融规则离线 Benchmark 不依赖外部模型或网络，可在相同环境重复运行。
+
+Checkpoint 快照完整性验证脚本（在 api 容器内执行，使用真实 PostgreSQL）：
+
+```bash
+docker compose cp scripts/verify_checkpoint_engine.py api:/tmp/verify_checkpoint_engine.py
+docker compose exec -T api python /tmp/verify_checkpoint_engine.py
+```
+
+覆盖：完整快照序列化/恢复、Digest 校验、Secret 脱敏、幂等与冲突拒绝、跨租户隔离、损坏快照拒绝。
+
+Worker Recovery 与 Invocation Journal 验证脚本（api 容器内执行）：
+
+```bash
+docker compose cp scripts/verify_invocation_journal.py api:/tmp/verify_invocation_journal.py
+docker compose exec -T api python /tmp/verify_invocation_journal.py
+```
+
+覆盖：稳定幂等键、状态机、Fencing 拒绝旧写入、CONFIRMED 结果复用、参数冲突拒绝、UNKNOWN 不盲重试、人工对账收敛。
+
+真实 Worker SIGKILL 故障注入使用 `scripts/verify_worker_recovery.py`（start 启动 workflow → 宿主机 `docker kill -s SIGKILL` worker → `docker start` 重启 → check 验证 Run ID 不变、Workflow 自动恢复完成、恢复事件写入）。
+
+Pause / Approval 验证脚本（api 容器内执行）：
+
+```bash
+docker compose cp scripts/verify_step4.py api:/tmp/verify_step4.py
+docker compose exec -T api python /tmp/verify_step4.py
+```
+
+覆盖：Outbox 多命令与幂等、乐观锁条件更新、Action Hash/参数 Hash、审批幂等决策、参数变化失效、重复消费拒绝、过期拒绝。`scripts/verify_step4_e2e.py` 验证 Outbox 派发 Pause 命令到真实 Workflow、重复 command_id 幂等、Workflow 已完成时命令进入 SKIPPED 终态。
+
+## 八、生产上线前必须补齐
+
+1. **身份与租户安全（本模块已完成基础能力）：** OIDC/JWT、数据库 RBAC、ABAC、Resource ACL、审计与 PostgreSQL RLS 已实现；后续仍需接入 IdP 真实配置、Token Exchange 与 MFA。
+2. **数据治理：** 明确数据分类、最小化采集、加密、密钥管理、脱敏、留存、删除、跨境数据策略和访问审计。
+3. **核心账务隔离：** 本 Runtime 不应直接连接可写核心账务/交易通道；通过只读数据服务和受控命令服务隔离。当前演示 Resource Grant 是简单的用户-资源映射，生产还需接入组织/账户关系、属性策略和实时授权撤销。
+4. **双人控制：** 对所有高风险操作使用签名 Action Envelope、审批人职责分离、参数哈希、有效期、一次性 Nonce 和审批审计。
+5. **合规决策边界：** KYC/AML、制裁名单、信用审批和监管申报的最终决策必须由授权人员及机构正式系统负责。
+6. **模型风险管理：** 对模型/Prompt/Skill 版本、训练和评测数据、漂移、幻觉、偏差、可解释性与人工覆盖进行治理。
+7. **监测规则验证：** 演示规则不能用于生产监测。生产规则需经金融机构模型风险/合规流程校准、验证、审批和持续监控。
+8. **工具安全：** MCP Server 身份固定、TLS/OAuth、出站网络控制、供应链审核和沙箱隔离。
+9. **数据库变更：** 使用 Alembic Migration 替代 `create_all`，配置备份、PITR、加密与灾备演练。
+10. **韧性：** 对 Worker 故障、重复 Activity、未知外部操作结果和对账流程进行集成测试；生产使用持久化 Temporal 集群。
+11. **Benchmark：** 使用经批准的真实/脱敏数据集，冻结任务、独立标注、盲测、多次重复、置信区间、成本和安全硬门槛。
+12. **审计与可观测性：** 接入 OpenTelemetry 和不可篡改审计存储；对 Prompt、交易明细及个人数据严格脱敏与限权。
+
+---
+
+**项目定位：** 金融机构内部 Agent 执行与治理平台 MVP。当前实现只用于开发验证；在完成合规、信息安全、模型风险和业务验收前，不得将输出作为自动交易、授信、客户准入、AML 定性或监管报告依据。

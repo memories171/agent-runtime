@@ -1,0 +1,42 @@
+# Fault-injection overlay. Start with:
+#   docker compose -f docker-compose.yml -f docker-compose.fi.yml up -d --build mock-external fi-worker
+# Uses shared postgres/temporal/keycloak from the base compose. Never removes volumes.
+services:
+  mock-external:
+    build: .
+    image: financial-agent-runtime-api:latest
+    entrypoint: []
+    command: ["uvicorn", "scripts.fault_injection.mock_external_service:app", "--host", "0.0.0.0", "--port", "8002"]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: /app
+    volumes:
+      - fi_data:/app/fi-data
+    ports:
+      - "8002:8002"
+    networks:
+      - default
+
+  fi-worker:
+    build: .
+    image: financial-agent-runtime-api:latest
+    entrypoint: []
+    command: ["python", "-m", "scripts.fault_injection.fixture_worker"]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      DATABASE_URL: postgresql+asyncpg://agent_app:agent_app@postgres:5432/agent_runtime
+      SKILLS_DIR: /app/skills
+      FI_MOCK_SERVICE_URL: http://mock-external:8002
+      PYTHONPATH: /app
+    volumes:
+      - fi_data:/app/fi-data
+      - ./skills:/app/skills:ro
+    depends_on:
+      - temporal
+      - postgres
+      - mock-external
+    networks:
+      - default
+
+volumes:
+  fi_data:

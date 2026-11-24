@@ -1,0 +1,89 @@
+{
+  "checks": [
+    {
+      "tag": "open",
+      "url": "https://192.168.110.91:5173/",
+      "login": true,
+      "auth_error": false,
+      "title": null
+    },
+    {
+      "tag": "after_login",
+      "url": "https://192.168.110.91:5173/",
+      "login": false,
+      "auth_error": false,
+      "title": "运营总览"
+    },
+    {
+      "tag": "refresh_1",
+      "url": "https://192.168.110.91:5173/",
+      "login": false,
+      "auth_error": false,
+      "title": "运营总览"
+    },
+    {
+      "tag": "refresh_2",
+      "url": "https://192.168.110.91:5173/",
+      "login": false,
+      "auth_error": false,
+      "title": "运营总览"
+    },
+    {
+      "tag": "refresh_3",
+      "url": "https://192.168.110.91:5173/",
+      "login": false,
+      "auth_error": false,
+      "title": "运营总览"
+    },
+    {
+      "tag": "page_AI 对话工作台",
+      "url": "https://192.168.110.91:5173/",
+      "login": false,
+      "auth_error": false,
+      "title": "AI 对话工作台"
+    },
+    {
+      "tag": "page_长期记忆 Memory",
+      "url": "https://192.168.110.91:5173/",
+      "login": false,
+      "auth_error": false,
+      "title": "长期记忆 Memory Center"
+    },
+    {
+      "tag": "page_审批中心",
+      "url": "https://192.168.110.91:5173/",
+      "login": false,
+      "auth_error": false,
+      "title": "审批中心"
+    },
+    {
+      "tag": "page_运营总览",
+      "url": "https://192.168.110.91:5173/",
+      "login": false,
+      "auth_error": false,
+      "title": "运营总览"
+    },
+    {
+      "tag": "after_idle_10s",
+      "url": "https://192.168.110.91:5173/",
+      "login": false,
+      "auth_error": false,
+      "title": "运营总览"
+    }
+  ],
+  "errors": [
+    "CONSOLE Warning: [antd: Card] `bordered` is deprecated. Please use `variant` instead.",
+    "CONSOLE Warning: [antd: Space] `direction` is deprecated. Please use `orientation` instead.",
+    "CONSOLE Failed to load resource: the server responded with a status of 404 ()",
+    "CONSOLE Warning: [antd: Alert] `message` is deprecated. Please use `title` instead.",
+    "CONSOLE Warning: [antd: Card] `bordered` is deprecated. Please use `variant` instead.",
+    "CONSOLE Warning: [antd: Alert] `message` is deprecated. Please use `title` instead.",
+    "CONSOLE Warning: [antd: Card] `bordered` is deprecated. Please use `variant` instead.",
+    "CONSOLE Warning: [antd: Alert] `message` is deprecated. Please use `title` instead.",
+    "CONSOLE Warning: [antd: Card] `bordered` is deprecated. Please use `variant` instead.",
+    "CONSOLE Warning: [antd: Alert] `message` is deprecated. Please use `title` instead.",
+    "CONSOLE Warning: [antd: Card] `bordered` is deprecated. Please use `variant` instead.",
+    "CONSOLE Warning: [antd: List] The `List` component is deprecated and will be removed in the next major version. If you're using version 6.6.0 or later, please use `Listy` instead.",
+    "CONSOLE Warning: [antd: Drawer] `width` is deprecated. Please use `size` instead."
+  ]
+}

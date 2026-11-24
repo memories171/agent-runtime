@@ -1,0 +1,46 @@
+name: governance-ci
+
+# Minimum CI skeleton. The authoritative test runner is scripts/run_pytest_audited.ps1
+# (records START/END/ELAPSED/EXITCODE). This workflow wires fast checks only;
+# Temporal IT / wall-clock / restore E2E remain explicit nightly/manual gates.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  backend-fast:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: financial-agent-runtime
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e '.[test,observability]'
+      - name: Lint
+        run: python -m ruff check src tests || true
+      - name: Governance static check
+        shell: pwsh
+        run: ./scripts/check_production_governance.ps1 -Root (Get-Location).Path
+      - name: Fast tests (audited)
+        shell: pwsh
+        run: ./scripts/run_pytest_audited.ps1 -LogPrefix ci_fast -MarkerExpression "not temporal_it and not wall_clock_30m"
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: finora-frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: finora-frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build

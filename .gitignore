@@ -1,0 +1,47 @@
+# Root gitignore — child .gitignore files add backend/frontend specifics.
+# Environment & secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+certs/
+**/.snapshots/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Logs, DB, backups, audit artifacts
+*.log
+*.db
+*.sqlite
+backups/
+*.dump
+*.dump.err
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Audited test artifacts (kept out of source control; retained locally for evidence)
+*meta.out
+*.out
+*.err
+b6_watcher_done.txt
+
+# Stray artifacts from historical shell-escaping mistakes
+*.out'
+*.err'

@@ -1,0 +1,94 @@
+# B5.2 local Staging: a fully isolated Temporal SQL Persistence environment.
+# Run with: docker compose -f docker-compose.staging.yml up -d
+# It uses a SEPARATE compose project ("finora-staging"), ports, databases, role
+# and volumes from the Dev environment. It never touches agent_runtime or the
+# Dev temporal_pg_data volume.
+name: finora-staging
+
+services:
+  temporal-staging-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${TEMPORAL_STAGING_SQL_USER:-temporal_staging}
+      POSTGRES_PASSWORD: ${TEMPORAL_STAGING_SQL_PASSWORD:-temporal_staging_dev_2026}
+      POSTGRES_DB: temporal
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - temporal_staging_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TEMPORAL_STAGING_SQL_USER:-temporal_staging} -d temporal"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  temporal-staging-schema-init:
+    image: temporalio/admin-tools@sha256:4a95866efba29d7e17ab012df5232795e8b0ad0f7d5f9d1ec4df321f7792a754
+    user: "0:0"
+    restart: "on-failure:6"
+    depends_on:
+      temporal-staging-postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_SEEDS: temporal-staging-postgres
+      POSTGRES_USER: ${TEMPORAL_STAGING_SQL_USER:-temporal_staging}
+      POSTGRES_PWD: ${TEMPORAL_STAGING_SQL_PASSWORD:-temporal_staging_dev_2026}
+      SQL_PASSWORD: ${TEMPORAL_STAGING_SQL_PASSWORD:-temporal_staging_dev_2026}
+      TEMPORAL_DB: temporal
+      TEMPORAL_VISIBILITY_DB: temporal_visibility
+    volumes:
+      - ./docker/temporal/scripts:/scripts:ro
+      - temporal_staging_schema_flag:/flags
+    entrypoint: ["/bin/sh"]
+    command: /scripts/setup-postgres.sh
+
+  temporal-staging:
+    image: temporalio/server@sha256:7bf69188a6232fea14869b9cef3d94aa82a1601d99517f7e86c71f22da4e0670
+    command: ["/etc/temporal/entrypoint.sh"]
+    depends_on:
+      temporal-staging-schema-init:
+        condition: service_completed_successfully
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_SEEDS: temporal-staging-postgres
+      POSTGRES_USER: ${TEMPORAL_STAGING_SQL_USER:-temporal_staging}
+      POSTGRES_PWD: ${TEMPORAL_STAGING_SQL_PASSWORD:-temporal_staging_dev_2026}
+      SQL_PASSWORD: ${TEMPORAL_STAGING_SQL_PASSWORD:-temporal_staging_dev_2026}
+      BIND_ON_IP: 0.0.0.0
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    ports:
+      - "7234:7233"
+      - "8234:8233"
+    volumes:
+      - ./docker/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig:ro
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "7233"]
+      interval: 5s
+      timeout: 3s
+      start_period: 30s
+      retries: 60
+    restart: unless-stopped
+
+  temporal-staging-namespace-init:
+    image: temporalio/admin-tools@sha256:4a95866efba29d7e17ab012df5232795e8b0ad0f7d5f9d1ec4df321f7792a754
+    restart: "on-failure:5"
+    depends_on:
+      temporal-staging:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal-staging:7233
+      DEFAULT_NAMESPACE: default
+      DEFAULT_NAMESPACE_RETENTION: ${TEMPORAL_STAGING_RETENTION:-168h}
+    volumes:
+      - ./docker/temporal/scripts:/scripts:ro
+    entrypoint: ["/bin/sh"]
+    command: /scripts/create-namespace.sh
+
+volumes:
+  temporal_staging_pg_data:
+  temporal_staging_schema_flag:

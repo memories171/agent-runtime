@@ -1,0 +1,104 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/certs/cert.pem
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/certs/key.pem
+      KC_HOSTNAME_URL: https://192.168.110.91:8443
+    ports: ["8090:8080", "8443:8443"]
+    volumes:
+      - ./docker/keycloak:/opt/keycloak/data/import:ro
+      - ./docker/keycloak/themes:/opt/keycloak/themes:ro
+      - ../certs:/opt/keycloak/certs:ro
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: agent_runtime
+    ports: ["127.0.0.1:5433:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent_runtime"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  temporal:
+    image: temporalio/temporal:latest
+    command: ["server", "start-dev", "--ip", "0.0.0.0"]
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    command: ["sh", "-c", "alembic upgrade head && uvicorn agent_runtime.api:app --host 0.0.0.0 --port 8000"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://agent_app:agent_app@postgres:5432/agent_runtime
+      DATABASE_MIGRATION_URL: postgresql+asyncpg://agent:agent@postgres:5432/agent_runtime
+      AUTO_CREATE_DB: "false"
+      TEMPORAL_ADDRESS: temporal:7233
+      SKILLS_DIR: /app/skills
+      SNAPSHOT_STORAGE_BACKEND: local
+      SNAPSHOT_LOCAL_DIR: /app/snapshots
+      SNAPSHOT_S3_ENDPOINT: http://minio:9000
+      SNAPSHOT_S3_BUCKET: finora-snapshots
+      SNAPSHOT_S3_ACCESS_KEY: finora
+      SNAPSHOT_S3_SECRET_KEY: finora12345
+    ports: ["8000:8000"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./skills:/app/skills:ro
+      - snapshot_data:/app/snapshots
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["python", "-m", "agent_runtime.worker"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://agent_app:agent_app@postgres:5432/agent_runtime
+      DATABASE_MIGRATION_URL: postgresql+asyncpg://agent:agent@postgres:5432/agent_runtime
+      AUTO_CREATE_DB: "false"
+      TEMPORAL_ADDRESS: temporal:7233
+      SKILLS_DIR: /app/skills
+      SNAPSHOT_STORAGE_BACKEND: local
+      SNAPSHOT_LOCAL_DIR: /app/snapshots
+      SNAPSHOT_S3_ENDPOINT: http://minio:9000
+      SNAPSHOT_S3_BUCKET: finora-snapshots
+      SNAPSHOT_S3_ACCESS_KEY: finora
+      SNAPSHOT_S3_SECRET_KEY: finora12345
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./skills:/app/skills:ro
+      - snapshot_data:/app/snapshots
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  snapshot_data:

@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "financial-agent-runtime"
+version = "0.2.0"
+description = "Durable, multi-tenant financial-services Agent Runtime starter"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary - adapt before production use" }
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "temporalio>=1.15,<2",
+  "sqlalchemy[asyncio]>=2.0.38,<3",
+  "asyncpg>=0.30,<1",
+  "pydantic>=2.10,<3",
+  "pydantic-settings>=2.7,<3",
+  "httpx>=0.28,<1",
+  "jsonschema>=4.23,<5",
+  "mcp[cli]>=2.0,<3",
+  "structlog>=25,<26",
+  "PyJWT[crypto]>=2.8,<3",
+  "cryptography>=42,<50",
+  "alembic>=1.13,<2",
+]
+
+[project.optional-dependencies]
+observability = [
+  "opentelemetry-api>=1.30,<2",
+  "opentelemetry-sdk>=1.30,<2",
+  "opentelemetry-instrumentation-fastapi>=0.51b0",
+  "opentelemetry-instrumentation-sqlalchemy>=0.51b0",
+]
+test = ["pytest>=8.3,<9", "pytest-asyncio>=0.25,<1", "pytest-timeout>=2.3,<3", "ruff>=0.9,<1", "mypy>=1.14,<2", "asgi-lifespan>=2.1,<3"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+timeout = 300
+timeout_method = "thread"
+markers = [
+  "temporal_it: 真实 Temporal Server 集成测试（需 RUN_TEMPORAL_IT=1）",
+  "wall_clock_30m: 35 分钟真实墙钟长任务测试（CI nightly）",
+  "reconciliation: UNKNOWN 状态对账测试",
+  "checkpoint_service: Checkpoint 服务级测试",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]

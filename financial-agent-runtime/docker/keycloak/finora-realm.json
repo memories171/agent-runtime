@@ -1,0 +1,216 @@
+{
+  "realm": "finora",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginTheme": "finora",
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "clients": [
+    {
+      "clientId": "finora-web",
+      "name": "Finora Web Console",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [
+        "https://localhost:5173/auth/callback",
+        "https://192.168.110.91:5173/auth/callback"
+      ],
+      "webOrigins": [
+        "https://localhost:5173",
+        "https://192.168.110.91:5173"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "https://localhost:5173,https://192.168.110.91:5173",
+        "pkce.code.challenge.method": "S256"
+      },
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "address",
+        "phone",
+        "offline_access",
+        "microprofile-jwt"
+      ],
+      "protocolMappers": [
+        {
+          "name": "finora-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "finora-web",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "tenant-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "tenant_id",
+            "claim.name": "tenant_id",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "organization-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "organization_id",
+            "claim.name": "organization_id",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "finora-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "stable-subject",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "username",
+            "claim.name": "sub",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "roles": {
+    "realm": [
+      {
+        "name": "analyst",
+        "description": "Can create runs and read authorized financial resources"
+      },
+      {
+        "name": "auditor",
+        "description": "Read-only auditor for an isolated tenant"
+      },
+      {
+        "name": "read_only_user",
+        "description": "Seeded read_only_user role"
+      }
+    ]
+  },
+  "users": [
+    {
+      "username": "analyst-01",
+      "enabled": true,
+      "email": "analyst-01@example.com",
+      "emailVerified": true,
+      "firstName": "Analyst",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Finora@2026",
+          "temporary": false
+        }
+      ],
+      "attributes": {
+        "tenant_id": [
+          "demo-bank"
+        ],
+        "organization_id": [
+          "demo-org"
+        ]
+      },
+      "realmRoles": [
+        "analyst"
+      ]
+    },
+    {
+      "username": "auditor-01",
+      "enabled": true,
+      "email": "auditor-01@example.com",
+      "emailVerified": true,
+      "firstName": "Auditor",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Audit@2026",
+          "temporary": false
+        }
+      ],
+      "attributes": {
+        "tenant_id": [
+          "tenant-b"
+        ],
+        "organization_id": [
+          "org-b"
+        ]
+      },
+      "realmRoles": [
+        "auditor"
+      ]
+    },
+    {
+      "username": "user-c",
+      "enabled": true,
+      "email": "user-c@example.com",
+      "emailVerified": true,
+      "firstName": "User",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "UserC@2026",
+          "temporary": false
+        }
+      ],
+      "attributes": {
+        "tenant_id": [
+          "tenant-c"
+        ],
+        "organization_id": [
+          "org-c"
+        ]
+      },
+      "realmRoles": [
+        "read_only_user"
+      ]
+    }
+  ]
+}
