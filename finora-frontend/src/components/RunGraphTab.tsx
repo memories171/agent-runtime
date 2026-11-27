@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Alert, Button, Card, Descriptions, Empty, Segmented, Space, Spin, Table, Tag, Timeline, Typography } from 'antd';
 import { api } from '../api';
@@ -19,6 +19,7 @@ const statusColors: Record<NodeStatus, string> = {
   FAILED: '#ff4d4f',
   CANCELLED: '#8c8c8c',
   SKIPPED: '#bfbfbf',
+  TIMED_OUT: '#d46b08',
 };
 
 function nodeDepths(graph: TaskGraphDetail): Record<string, number> {
@@ -51,6 +52,7 @@ interface Props {
 export function RunGraphTab({ runId, refreshToken }: Props) {
   const [view, setView] = useState<'graph' | 'events'>('graph');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const requestKeyRef = useRef<string>('');
   const [nodeDetail, setNodeDetail] = useState<TaskGraphNodeDetail | null>(null);
   const [contextPack, setContextPack] = useState<ContextPack | null>(null);
   const [contextError, setContextError] = useState<string | null>(null);
@@ -62,11 +64,21 @@ export function RunGraphTab({ runId, refreshToken }: Props) {
   );
 
   useEffect(() => {
+    setSelectedNodeId(null);
+    setNodeDetail(null);
+    setContextPack(null);
+    setContextError(null);
+    requestKeyRef.current = '';
+  }, [runId]);
+
+  useEffect(() => {
     if (!graph || !selectedNodeId) {
       setNodeDetail(null);
       return;
     }
     let active = true;
+    setContextPack(null);
+    setContextError(null);
     api.getGraphNode(graph.graph_id, selectedNodeId).then((detail) => {
       if (active) setNodeDetail(detail);
     }).catch(() => {
@@ -94,7 +106,7 @@ export function RunGraphTab({ runId, refreshToken }: Props) {
       tooltip: { trigger: 'item', formatter: (params: { dataType?: string; name?: string; data?: Record<string, unknown> }) => {
         if (params.dataType === 'edge') return `${params.data?.source} → ${params.data?.target}`;
         const data = params.data as { name?: string; status?: NodeStatus; duration_ms?: number; attempt_count?: number } | undefined;
-        return `${data?.name || ''}<br/>状态：${data?.status || '-'}<br/>耗时：${formatDuration(data?.duration_ms || 0)}<br/>重试：${data?.attempt_count || 0}`;
+        return `${data?.name || ''}<br/>状态：${data?.status || '-'}<br/>耗时：${formatDuration((data?.duration_ms || 0) / 1000)}<br/>重试：${data?.attempt_count || 0}`;
       } },
       legend: { data: Object.keys(statusColors), bottom: 0, type: 'scroll' },
       animationDuration: 300,
@@ -171,7 +183,7 @@ export function RunGraphTab({ runId, refreshToken }: Props) {
             <Descriptions.Item label="Node ID">{nodeDetail.node_id}</Descriptions.Item>
             <Descriptions.Item label="状态"><Tag color={statusColors[nodeDetail.status]}>{nodeDetail.status}</Tag></Descriptions.Item>
             <Descriptions.Item label="类型">{nodeDetail.node_type}</Descriptions.Item>
-            <Descriptions.Item label="耗时">{formatDuration(nodeDetail.duration_ms)}</Descriptions.Item>
+            <Descriptions.Item label="耗时">{formatDuration((nodeDetail.duration_ms || 0) / 1000)}</Descriptions.Item>
             <Descriptions.Item label="重试次数">{nodeDetail.attempt_count}</Descriptions.Item>
             <Descriptions.Item label="Token">{nodeDetail.token_usage?.input || 0} / {nodeDetail.token_usage?.output || 0}</Descriptions.Item>
             <Descriptions.Item label="ContextPack">{nodeDetail.context_pack_id || '-'}</Descriptions.Item>
@@ -180,8 +192,14 @@ export function RunGraphTab({ runId, refreshToken }: Props) {
           <Paragraph type="secondary">{nodeDetail.description}</Paragraph>
           <Space wrap style={{ marginBottom: 8 }}>
             <Button size="small" onClick={() => {
+              const requestKey = `${runId}:${graph.graph_id}:${nodeDetail.node_id}`;
+              requestKeyRef.current = requestKey;
               setContextError(null);
-              api.getRunContext(runId).then((pack) => setContextPack(pack)).catch((error) => {
+              setContextPack(null);
+              api.getRunContext(runId).then((pack) => {
+                if (requestKeyRef.current === requestKey) setContextPack(pack);
+              }).catch((error) => {
+                if (requestKeyRef.current !== requestKey) return;
                 setContextPack(null);
                 setContextError(error instanceof Error ? error.message : '加载失败');
               });

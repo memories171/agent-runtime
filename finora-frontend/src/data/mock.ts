@@ -3,6 +3,7 @@ import type {
   CheckpointRecord, DelegatedIdentity, LlmCallRecord, ManagedSkill, McpServerRecord,
   McpToolRecord, MemoryRecord, ReviewCase, RoleRecord, RunEvent, RunRecord, RunTelemetry,
   SecurityEvent, SecuritySnapshot, TenantRecord, ToolCallRecord, UserRecord, WorkerFailure,
+  ChatConversation, ChatMessage, KnowledgeChunkDetail, KnowledgeDocument,
 } from '../types';
 
 const STORAGE_KEY = 'finora.agent-runtime.mock.v2';
@@ -27,6 +28,10 @@ export interface MockState {
   security: SecuritySnapshot;
   benchmarks: BenchmarkExperiment[];
   ablations: AblationRecord[];
+  conversations: ChatConversation[];
+  chatMessagesByConversation: Record<string, ChatMessage[]>;
+  knowledgeDocuments: KnowledgeDocument[];
+  knowledgeChunksByDocument: Record<string, KnowledgeChunkDetail[]>;
 }
 
 function makeEvent(type: string, payload: Record<string, unknown>, minutesAgo: number): RunEvent {
@@ -379,10 +384,10 @@ const delegatedIdentities: DelegatedIdentity[] = [
 ];
 
 const approvals: ApprovalRecord[] = [
-  { approval_id: 'apr-demo-001', run_id: 'run-demo-sla-010', requester: 'analyst-01', approver: 'compliance-01', decision: 'APPROVED', reason: '已完成独立复核。', time: isoAgo(162), demo: true },
-  { approval_id: 'apr-demo-002', run_id: 'run-demo-approval-003', requester: 'analyst-01', approver: 'compliance-01', decision: 'PENDING', reason: '等待确认高风险导出参数。', time: isoAgo(7), demo: true },
-  { approval_id: 'apr-demo-003', run_id: 'run-demo-recover-004', requester: 'analyst-02', approver: 'platform-admin', decision: 'APPROVED', reason: '恢复后继续研究任务。', time: isoAgo(101), demo: true },
-  { approval_id: 'apr-demo-004', run_id: 'run-demo-failed-005', requester: 'analyst-01', approver: 'compliance-01', decision: 'REJECTED', reason: '恢复预算与证据链不满足要求。', time: isoAgo(80), demo: true },
+  { approval_id: 'apr-demo-001', run_id: 'run-demo-sla-010', requester: 'analyst-01', requested_by: 'analyst-01', approver: 'compliance-01', approver_id: 'compliance-01', decision: 'APPROVED', approval_status: 'APPROVED', tool_name: 'financial.create_review_case', operation_type: 'CASE_CREATE', target_resource_id: 'CUST-DEMO-001', risk_level: 'HIGH', reason: '已完成独立复核。', time: isoAgo(162), issued_at: isoAgo(162), expires_at: isoAhead(60), policy_version: 'v1', version: 1, demo: true },
+  { approval_id: 'apr-demo-002', run_id: 'run-demo-approval-003', requester: 'analyst-01', requested_by: 'analyst-01', approver: 'compliance-01', approver_id: null, decision: 'PENDING', approval_status: 'PENDING', tool_name: 'financial.create_review_case', operation_type: 'CASE_CREATE', target_resource_id: 'ACC-DEMO-001', risk_level: 'HIGH', reason: '等待确认高风险导出参数。', time: isoAgo(7), issued_at: isoAgo(7), expires_at: isoAhead(120), policy_version: 'v1', version: 0, demo: true },
+  { approval_id: 'apr-demo-003', run_id: 'run-demo-recover-004', requester: 'analyst-02', requested_by: 'analyst-02', approver: 'platform-admin', approver_id: 'platform-admin', decision: 'APPROVED', approval_status: 'APPROVED', tool_name: 'financial.list_transactions', operation_type: 'RUN_RECOVER', target_resource_id: 'ACC-DEMO-001', risk_level: 'MEDIUM', reason: '恢复后继续研究任务。', time: isoAgo(101), issued_at: isoAgo(101), expires_at: isoAhead(30), policy_version: 'v1', version: 1, demo: true },
+  { approval_id: 'apr-demo-004', run_id: 'run-demo-failed-005', requester: 'analyst-01', requested_by: 'analyst-01', approver: 'compliance-01', approver_id: 'compliance-01', decision: 'REJECTED', approval_status: 'REJECTED', tool_name: 'financial.create_review_case', operation_type: 'CASE_CREATE', target_resource_id: 'CUST-DEMO-002', risk_level: 'HIGH', reason: '恢复预算与证据链不满足要求。', time: isoAgo(80), issued_at: isoAgo(80), expires_at: isoAgo(20), policy_version: 'v1', version: 1, demo: true },
 ];
 
 const securityEvents: SecurityEvent[] = [
@@ -431,6 +436,35 @@ const ablations: AblationRecord[] = [
   { ablation_id: 'abl-demo-005', name: '移除 Prompt 注入护栏', removed_component: 'Injection Guard', success_rate: 86, delta_pp: -6, recovery_success_rate: 89, unauthorized_access_rate: 0.9, note: '注入成功率仅为合成演示指标。', demo: true },
 ];
 
+const conversations: ChatConversation[] = [
+  { conversation_id: 'conv-demo-001', title: '信贷政策研究', session_id: 'session-chat-demo-001', created_at: isoAgo(180), updated_at: isoAgo(12) },
+  { conversation_id: 'conv-demo-002', title: '交易监测复核提示', session_id: 'session-chat-demo-002', created_at: isoAgo(60), updated_at: isoAgo(30) },
+];
+
+const chatMessagesByConversation: Record<string, ChatMessage[]> = {
+  'conv-demo-001': [
+    { message_id: 'msg-demo-001', conversation_id: 'conv-demo-001', role: 'user', content: '总结一下普惠小微贷款的利率约束。', created_at: isoAgo(20) },
+    { message_id: 'msg-demo-002', conversation_id: 'conv-demo-001', role: 'assistant', content: '演示答复：普惠小微贷款需关注 LPR 基准与综合融资成本明示，示例数据不构成政策结论。', reasoning: '演示推理：先定位知识条目，再给出适用边界。', created_at: isoAgo(19) },
+  ],
+  'conv-demo-002': [],
+};
+
+const knowledgeDocuments: KnowledgeDocument[] = [
+  { document_id: 'doc-demo-001', title: '信贷基础概念', source: '信贷.md', content_type: 'markdown', char_count: 700, chunk_count: 2, status: 'READY', created_at: isoAgo(600) },
+  { document_id: 'doc-demo-002', title: '征信修复与转型金融', source: '信贷补充.md', content_type: 'markdown', char_count: 580, chunk_count: 2, status: 'READY', created_at: isoAgo(580) },
+];
+
+const knowledgeChunksByDocument: Record<string, KnowledgeChunkDetail[]> = {
+  'doc-demo-001': [
+    { chunk_id: 'chunk-demo-001-1', chunk_index: 0, heading: '信贷业务分类', content: '个人贷款与公司贷款、担保方式与期限结构。', char_count: 380 },
+    { chunk_id: 'chunk-demo-001-2', chunk_index: 1, heading: '风控体系', content: '五级分类、评分卡与内部评级的应用边界。', char_count: 320 },
+  ],
+  'doc-demo-002': [
+    { chunk_id: 'chunk-demo-002-1', chunk_index: 0, heading: '征信修复', content: '一次性信用修复的适用条件与风控含义。', char_count: 300 },
+    { chunk_id: 'chunk-demo-002-2', chunk_index: 1, heading: '转型金融', content: '转型金融标准扩容与碳减排绩效挂钩机制。', char_count: 280 },
+  ],
+};
+
 function createInitialMockState(): MockState {
   return {
     runs,
@@ -447,6 +481,10 @@ function createInitialMockState(): MockState {
     security,
     benchmarks: benchmarkExperiments,
     ablations,
+    conversations,
+    chatMessagesByConversation,
+    knowledgeDocuments,
+    knowledgeChunksByDocument,
   };
 }
 
@@ -459,8 +497,19 @@ function loadMockState(): MockState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as MockState;
-      if (Array.isArray(parsed.runs) && parsed.telemetryByRun && parsed.security && Array.isArray(parsed.benchmarks)) return parsed;
+      const parsed = JSON.parse(raw) as Partial<MockState>;
+      if (Array.isArray(parsed.runs) && parsed.telemetryByRun && parsed.security && Array.isArray(parsed.benchmarks)) {
+        const initial = createInitialMockState();
+        return {
+          ...initial,
+          ...parsed,
+          conversations: Array.isArray(parsed.conversations) ? parsed.conversations : initial.conversations,
+          chatMessagesByConversation: parsed.chatMessagesByConversation || initial.chatMessagesByConversation,
+          knowledgeDocuments: Array.isArray(parsed.knowledgeDocuments) ? parsed.knowledgeDocuments : initial.knowledgeDocuments,
+          knowledgeChunksByDocument: parsed.knowledgeChunksByDocument || initial.knowledgeChunksByDocument,
+          security: { ...initial.security, ...parsed.security, approvals: Array.isArray(parsed.security?.approvals) ? parsed.security!.approvals : initial.security.approvals },
+        } as MockState;
+      }
     }
   } catch { /* Reset invalid local demo data. */ }
   const initial = createInitialMockState();

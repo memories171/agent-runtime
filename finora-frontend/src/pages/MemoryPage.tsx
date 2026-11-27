@@ -13,6 +13,8 @@ import { useApp } from '../state/AppContext';
 import { ApiUnavailable, DemoBanner, formatTime, MemoryTypeTag, ScopeTag, shortId } from '../components/Ui';
 import type { MemoryRecord, MemoryScope, MemoryType } from '../types';
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const { Paragraph, Text } = Typography;
 
 type MemoryFormValues = {
@@ -73,7 +75,12 @@ export function MemoryPage() {
   };
 
   const submit = async () => {
-    const values = await form.validateFields();
+    let values: Awaited<ReturnType<typeof form.validateFields>>;
+    try {
+      values = await form.validateFields();
+    } catch {
+      return;
+    }
     const acl = (values.acl_text || '').split(',').map((item) => item.trim()).filter(Boolean);
     try {
       if (editing) {
@@ -212,7 +219,7 @@ export function MemoryPage() {
         </Row>
         <Row gutter={12}>
           <Col span={12}><Form.Item label="Confidence (0-1)" name="confidence"><InputNumber min={0} max={1} step={0.05} style={{ width: '100%' }} /></Form.Item></Col>
-          <Col span={12}><Form.Item label="Source Run ID" name="source_run_id"><Input placeholder="可选" /></Form.Item></Col>
+          <Col span={12}><Form.Item label="Source Run ID" name="source_run_id" rules={[{ validator: (_, value) => (!value || UUID_PATTERN.test(String(value))) ? Promise.resolve() : Promise.reject(new Error('需为 UUID 格式')) }]}><Input placeholder="可选，UUID 格式" /></Form.Item></Col>
         </Row>
         <Row gutter={12}>
           <Col span={12}><Form.Item label="Expiration" name="expires_at"><Input placeholder="ISO 时间，可选" /></Form.Item></Col>

@@ -20,6 +20,7 @@ from agent_runtime.graph.service import (
     append_graph_event, list_events, list_nodes, load_definition,
     latest_definition_for_run, get_node, upsert_definition,
 )
+from agent_runtime.graph.state_machine import is_terminal_graph
 from agent_runtime.graph.validate import build_definition, validate_proposal
 
 router = APIRouter()
@@ -90,8 +91,13 @@ async def get_run_graph_nodes(
 
 @router.get("/api/v1/graphs/{graph_id}")
 @router.get("/v1/graphs/{graph_id}")
-async def get_graph(graph_id: str, principal: Principal = Depends(get_principal)):
+async def get_graph(
+    graph_id: str,
+    principal: Principal = Depends(get_principal),
+    session: AsyncSession = Depends(get_session),
+):
     row = await _load_graph_row(principal.tenant_id, graph_id)
+    await _check_run_access(session, principal, row.run_id)
     return await _graph_payload(principal.tenant_id, graph_id, row.graph_version)
 
 
@@ -144,7 +150,7 @@ async def replan_graph(
     base = await load_definition(principal.tenant_id, graph_id, row.graph_version)
     if base is None:
         raise HTTPException(status_code=404, detail="graph definition not found")
-    if base.graph_status in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+    if is_terminal_graph(base.graph_status):
         raise HTTPException(status_code=409, detail="cannot replan a terminal graph")
 
     proposal = GraphProposal.model_validate(body.proposed_graph)
@@ -171,7 +177,15 @@ async def replan_graph(
         tenant_id=principal.tenant_id,
         graph_version=base.graph_version + 1,
     )
-    await upsert_definition(definition, validation=report, planner_model=principal.user_id)
+    from agent_runtime.graph.service import GraphVersionConflict
+
+    try:
+        await upsert_definition(
+            definition, validation=report, planner_model=principal.user_id,
+            expected_version=base.graph_version,
+        )
+    except GraphVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     await append_graph_event(GraphEvent(
         graph_id=graph_id,
         run_id=str(base.run_id),

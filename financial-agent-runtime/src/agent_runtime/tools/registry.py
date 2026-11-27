@@ -240,7 +240,7 @@ async def _financial_list_transactions(args: dict[str, Any], context: dict[str, 
 
 
 async def _financial_screen_transactions(args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    from sqlalchemy import select
+    from sqlalchemy import func, select
     from agent_runtime.db import FinancialAuditLog, FinancialTransaction, SessionLocal
     from agent_runtime.finance.monitoring import detect_review_indicators
 
@@ -249,11 +249,20 @@ async def _financial_screen_transactions(args: dict[str, Any], context: dict[str
     cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     async with tenant_session(SessionLocal, context["tenant_id"]) as session:
         await _require_resource_grant(session, context, "account", args["account_id"], "read")
+        # Screening the oldest 5,000 rows would silently miss the newest
+        # activity; take the most recent window and report truncation.
         rows = list((await session.execute(select(FinancialTransaction).where(
             FinancialTransaction.tenant_id == context["tenant_id"],
             FinancialTransaction.account_id == args["account_id"],
             FinancialTransaction.occurred_at >= cutoff,
-        ).order_by(FinancialTransaction.occurred_at.asc()).limit(5000))).scalars())
+        ).order_by(FinancialTransaction.occurred_at.desc()).limit(5000))).scalars())
+        rows.reverse()
+        total_in_window = (await session.execute(select(func.count()).select_from(FinancialTransaction).where(
+            FinancialTransaction.tenant_id == context["tenant_id"],
+            FinancialTransaction.account_id == args["account_id"],
+            FinancialTransaction.occurred_at >= cutoff,
+        ))).scalar_one()
+        truncated = total_in_window > len(rows)
     transactions = [{"transaction_id": row.transaction_id, "occurred_at": row.occurred_at,
                      "direction": row.direction, "amount_minor": row.amount_minor,
                      "currency": row.currency, "reference": row.reference} for row in rows]
@@ -264,10 +273,12 @@ async def _financial_screen_transactions(args: dict[str, Any], context: dict[str
     )
     async with tenant_session(SessionLocal, context["tenant_id"]) as session:
         session.add(_audit_record(FinancialAuditLog, context, "TRANSACTION_SCREENING_RUN", "financial_account", args["account_id"],
-                                  {"transaction_count": len(rows), "indicator_count": result["indicator_count"]}))
+                                  {"transaction_count": len(rows), "indicator_count": result["indicator_count"],
+                                   "truncated": truncated}))
         await session.commit()
     return {"account_id": args["account_id"], "lookback_days": lookback_days,
-            "transactions_scanned": len(rows), "scan_limit": 5000, **result}
+            "transactions_scanned": len(rows), "scan_limit": 5000,
+            "truncated": truncated, **result}
 
 
 async def _financial_create_review_case(args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -279,6 +290,11 @@ async def _financial_create_review_case(args: dict[str, Any], context: dict[str,
     case_type = args["case_type"]
     subject_id = args["subject_id"]
     async with tenant_session(SessionLocal, context["tenant_id"]) as session:
+        resource_type = {"KYC": "customer", "AML": "transaction", "TRANSACTION_REVIEW": "account"}[case_type]
+        # Check user-to-resource authorization before checking whether the resource exists,
+        # avoiding a cross-resource enumeration side channel. Idempotent replay is no
+        # exception: a guessed key must not disclose another subject's case.
+        await _require_resource_grant(session, context, resource_type, subject_id, "case:create")
         if context.get("idempotency_key"):
             existing_case = (await session.execute(select(FinancialReviewCase).where(
                 FinancialReviewCase.tenant_id == context["tenant_id"],
@@ -288,10 +304,6 @@ async def _financial_create_review_case(args: dict[str, Any], context: dict[str,
                 return {"case_id": str(existing_case.case_id), "case_type": existing_case.case_type,
                         "subject_id": existing_case.subject_id, "status": existing_case.status,
                         "idempotent_replay": True}
-        resource_type = {"KYC": "customer", "AML": "transaction", "TRANSACTION_REVIEW": "account"}[case_type]
-        # Check user-to-resource authorization before checking whether the resource exists,
-        # avoiding a cross-resource enumeration side channel.
-        await _require_resource_grant(session, context, resource_type, subject_id, "case:create")
         model = {"KYC": FinancialCustomer, "AML": FinancialTransaction,
                  "TRANSACTION_REVIEW": FinancialAccount}[case_type]
         subject = (await session.execute(select(model).where(
@@ -368,6 +380,14 @@ async def configure_mcp_servers(config_json: str) -> list[str]:
     for config in server_configs:
         alias = config["name"]
         url = config["url"]
+        from urllib.parse import urlsplit
+
+        from agent_runtime.config import settings
+
+        if settings.mcp_tls_required and urlsplit(str(url)).scheme != "https":
+            raise ValueError(
+                f"MCP server {alias} uses a non-HTTPS URL while MCP_TLS_REQUIRED is enabled"
+            )
         record: dict[str, Any] = {
             "server_id": alias,
             "name": config.get("label") or alias,

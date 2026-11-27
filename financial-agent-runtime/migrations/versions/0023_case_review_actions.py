@@ -27,7 +27,7 @@ COLUMNS = [
 SEED_CASES = [
     {
         "case_id": "11111111-1111-4111-8111-111111111001",
-        "case_type": "TRANSACTION_MONITORING",
+        "case_type": "AML",
         "subject_id": "ACC-DEMO-001",
         "rationale": "短时高频借记命中演示规则，建议结合客户背景人工核查。",
         "evidence_transaction_ids": ["TX-DEMO-001", "TX-DEMO-002"],
@@ -37,7 +37,7 @@ SEED_CASES = [
     },
     {
         "case_id": "22222222-2222-4222-8222-222222222002",
-        "case_type": "KYC_REVIEW",
+        "case_type": "KYC",
         "subject_id": "CUS-DEMO-002",
         "rationale": "尽调材料版本过期，需要合规人员确认完整性。",
         "evidence_transaction_ids": [],
@@ -47,7 +47,7 @@ SEED_CASES = [
     },
     {
         "case_id": "33333333-3333-4333-8333-333333333003",
-        "case_type": "RECONCILIATION",
+        "case_type": "TRANSACTION_REVIEW",
         "subject_id": "ACC-DEMO-002",
         "rationale": "演示对账差异待人工确认。",
         "evidence_transaction_ids": ["TX-DEMO-009"],

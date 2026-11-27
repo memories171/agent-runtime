@@ -42,6 +42,10 @@ RunStatus = Literal[
     "TIMED_OUT",
 ]
 
+TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({
+    "SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT",
+})
+
 
 class Principal(BaseModel):
     tenant_id: str = Field(min_length=1, max_length=128)
@@ -89,6 +93,8 @@ class RunRead(BaseModel):
     agent_id: str
     prompt: str
     status: RunStatus
+    pause_state: str = "NONE"
+    version: int = 0
     result: dict[str, Any] | None = None
     error: str | None = None
     created_at: str
@@ -253,6 +259,9 @@ class WorkflowInput(BaseModel):
     token_expires_at: datetime | None = None
     context_config: dict[str, Any] = Field(default_factory=dict)
     graph_config: dict[str, Any] = Field(default_factory=dict)
+    orchestration_config: dict[str, Any] = Field(default_factory=dict)
+    # Frozen orchestration limits so replay never depends on live settings.
+    orchestration_limits: dict[str, Any] = Field(default_factory=dict)
     # Frozen at run creation so Temporal replay never depends on live settings.
     # None => fall back to settings (backward-compatible with older histories).
     child_cancel_grace_seconds: int | None = None

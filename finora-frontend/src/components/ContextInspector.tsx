@@ -53,7 +53,6 @@ interface Props {
 
 export function ContextInspector({ runId, refreshToken }: Props) {
   const [view, setView] = useState<'current' | 'history' | 'metrics'>('current');
-  const [selectedPackId, setSelectedPackId] = useState<string | null>(null);
   const [pack, setPack] = useState<ContextPack | null>(null);
   const [history, setHistory] = useState<ContextPackSummary[]>([]);
   const [summaries, setSummaries] = useState<ContextSummaryRecord[]>([]);
@@ -62,6 +61,10 @@ export function ContextInspector({ runId, refreshToken }: Props) {
   const [error, setError] = useState<Error | null>(null);
 
   useEffect(() => {
+    if (isMockMode) {
+      setLoading(false);
+      return;
+    }
     let active = true;
     setLoading(true);
     setError(null);
@@ -76,7 +79,7 @@ export function ContextInspector({ runId, refreshToken }: Props) {
         setHistory(hist);
         setSummaries(summ);
         setMetrics(met);
-        const target = selectedPackId || hist[0]?.context_pack_id;
+        const target = hist[0]?.context_pack_id;
         if (target) {
           const detail = await api.getRunContext(runId);
           if (active) setPack(detail.schema_version ? detail : null);
@@ -90,7 +93,7 @@ export function ContextInspector({ runId, refreshToken }: Props) {
       }
     })();
     return () => { active = false; };
-  }, [runId, refreshToken, selectedPackId]);
+  }, [runId, refreshToken, isMockMode]);
 
   if (isMockMode) {
     return (
@@ -125,16 +128,16 @@ export function ContextInspector({ runId, refreshToken }: Props) {
         <div style={{ marginTop: 12 }}>
           <Select
             style={{ width: '100%' }}
-            placeholder="选择历史 ContextPack"
-            value={selectedPackId || history[0]?.context_pack_id}
-            onChange={(v) => setSelectedPackId(v)}
+            placeholder="历史版本详情暂不可用"
+            value={undefined}
+            disabled
             options={history.map((h) => ({
               value: h.context_pack_id,
               label: `${formatTime(h.created_at)} · cursor=${h.event_cursor} · ${h.compression_count} 次压缩${h.degraded ? ' · 降级' : ''}`,
             }))}
           />
           <Paragraph type="secondary" style={{ marginTop: 8 }}>
-            共 {history.length} 个 ContextPack 版本。当前实现展示最新快照；切换版本需后端按 context_pack_id 读取历史详情。
+            共 {history.length} 个 ContextPack 版本。当前仅展示版本列表；历史详情需后端提供按 context_pack_id 查询的端点，暂不支持切换。
           </Paragraph>
           <ItemList items={[]} emptyText="暂无 ContextPack 版本记录" />
         </div>

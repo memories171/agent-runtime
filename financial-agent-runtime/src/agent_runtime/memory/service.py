@@ -29,6 +29,19 @@ def _updated_at(record: MemoryRecord) -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _not_expired(record: MemoryRecord) -> bool:
+    raw = _meta_value(record, "expires_at")
+    if not raw:
+        return True
+    try:
+        expires_at = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return expires_at > datetime.now(timezone.utc)
+    except (ValueError, TypeError):
+        return True
+
+
 def to_memory_read(record: MemoryRecord) -> MemoryRead:
     memory_type = record.memory_type
     return MemoryRead(
@@ -136,7 +149,12 @@ async def list_memories(
         stmt = stmt.where(MemoryRecord.memory_type == memory_type.lower())
     if scope:
         stmt = stmt.where(MemoryRecord.scope == scope)
-    rows = list((await session.execute(stmt.order_by(MemoryRecord.created_at.desc()).limit(500))).scalars())
+    # Over-fetch before Python-side filtering so expired/archived rows do not
+    # silently shrink results to an arbitrary 500-row window.
+    rows = list((await session.execute(
+        stmt.order_by(MemoryRecord.created_at.desc()).limit(max(limit * 20, 2000))
+    )).scalars())
+    rows = [row for row in rows if _not_expired(row)]
     if not include_archived:
         rows = [row for row in rows if not bool(_meta_value(row, "archived", False))]
     terms = [term.lower() for term in (query or "").split() if term.strip()]
@@ -156,7 +174,10 @@ async def get_memory(session: AsyncSession, principal: Principal, memory_id: UUI
             _visible_conditions(principal),
         )
     )
-    return result.scalar_one_or_none()
+    row = result.scalar_one_or_none()
+    if row is None or not _not_expired(row):
+        return None
+    return row
 
 
 async def update_memory(

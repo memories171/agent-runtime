@@ -118,6 +118,29 @@ async def load_skills_activity(skill_ids: list[str]) -> list[dict[str, str]]:
     return loaded
 
 
+async def _record_tool_authz_decision(payload: dict[str, Any], reason: str) -> None:
+    """Record the allow-side decision so tool authorization is fully auditable."""
+    from agent_runtime.authorization.audit import record_decision
+    from agent_runtime.authorization.policies import AuthorizationDecision, AuthorizationRequest
+    from agent_runtime.contracts import Principal
+
+    principal = Principal.model_validate(payload["principal"])
+    async with session_for_tenant(payload["tenant_id"]) as session:
+        await record_decision(
+            session,
+            AuthorizationRequest(
+                principal=principal,
+                action="execute",
+                resource_type="tool",
+                resource_id=payload["tool_name"],
+                tenant_id=payload["tenant_id"],
+            ),
+            AuthorizationDecision(allowed=True, reason=reason),
+            action_label="TOOL_AUTHZ",
+        )
+        await session.commit()
+
+
 @activity.defn
 async def authorize_tool_activity(payload: dict[str, Any]) -> dict[str, Any]:
     from agent_runtime.orchestration.token_service import CapabilityDenied
@@ -139,6 +162,7 @@ async def authorize_tool_activity(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             authorize_tool(payload["principal"], payload["tenant_id"], tool, approval_granted=False)
     except ApprovalRequired:
+        await _record_tool_authz_decision(payload, "approval_required")
         return {"allowed": True, "requires_approval": True, "risk_level": tool.risk_level, "requires_distinct_approver": tool.requires_distinct_approver}
     except (ToolDenied, CapabilityDenied) as exc:
         from agent_runtime.authorization.audit import record_decision
@@ -164,6 +188,7 @@ async def authorize_tool_activity(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(exc, CapabilityDenied):
             result.update({"error_class": "non_retryable", "code": exc.code})
         return result
+    await _record_tool_authz_decision(payload, "allowed")
     return {"allowed": True, "requires_approval": False, "risk_level": tool.risk_level, "requires_distinct_approver": tool.requires_distinct_approver}
 
 
@@ -569,17 +594,21 @@ async def create_approval_binding_activity(payload: dict[str, Any]) -> dict[str,
 @activity.defn
 async def validate_approval_binding_activity(payload: dict[str, Any]) -> dict[str, Any]:
     """工具执行前重验审批绑定并返回 approval_id/version 供消费。"""
-    from agent_runtime.approval.service import ApprovalService
+    from agent_runtime.approval.service import ApprovalService, ApprovalStateChangedError
     from agent_runtime.db import ApprovalBinding
 
     async with session_for_tenant(payload["tenant_id"]) as session:
-        record = await ApprovalService().validate_binding(
-            session, tenant_id=payload["tenant_id"],
-            run_id=payload["run_id"], tool_call_id=payload["tool_call_id"],
-            tool_name=payload["tool_name"], target_resource_id=payload.get("target_resource_id", ""),
-            arguments=payload.get("arguments", {}), policy_version=payload.get("policy_version", "v1"),
-            approver_id=payload.get("approver_id"),
-        )
+        try:
+            record = await ApprovalService().validate_binding(
+                session, tenant_id=payload["tenant_id"],
+                run_id=payload["run_id"], tool_call_id=payload["tool_call_id"],
+                tool_name=payload["tool_name"], target_resource_id=payload.get("target_resource_id", ""),
+                arguments=payload.get("arguments", {}), policy_version=payload.get("policy_version", "v1"),
+                approver_id=payload.get("approver_id"),
+            )
+        except ApprovalStateChangedError:
+            await session.commit()
+            raise
         return {"approval_id": str(record.approval_id), "version": record.version,
                 "approver_id": record.approver_id}
 

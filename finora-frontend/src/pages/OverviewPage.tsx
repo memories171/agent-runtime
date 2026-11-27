@@ -8,6 +8,7 @@ import {
 import { api } from '../api';
 import { useAsyncData } from '../hooks/useAsyncData';
 import { useApp } from '../state/AppContext';
+import { useAuth } from '../auth/AuthProvider';
 import { DemoBanner, EChart, formatDuration, formatTime, MetricCard, percent, shortId, StatusTag } from '../components/Ui';
 import type { RunRecord } from '../types';
 
@@ -15,6 +16,7 @@ const { Paragraph, Text, Title } = Typography;
 
 export function OverviewPage({ onOpenRuns }: { onOpenRuns: () => void }) {
   const { refreshToken, identity, isMockMode, apiHealthy } = useApp();
+  const auth = useAuth();
   const runsQuery = useAsyncData(() => api.listRuns(100), [refreshToken, identity.tenantId]);
   const casesQuery = useAsyncData(() => api.listCases(), [refreshToken, identity.tenantId]);
   const healthQuery = useAsyncData(() => api.health(), [refreshToken]);
@@ -39,6 +41,9 @@ export function OverviewPage({ onOpenRuns }: { onOpenRuns: () => void }) {
   const avgBenchmark = benchmarks.length ? Math.round(benchmarks.reduce((sum, item) => sum + item.task_success_rate, 0) / benchmarks.length) : 0;
   const openCases = cases.filter((item) => ['OPEN', 'PENDING', 'IN_REVIEW'].includes(item.status.toUpperCase())).length;
   const unavailableFeatures = [
+    runsQuery.error && 'Agent Runs',
+    casesQuery.error && '复核案件',
+    healthQuery.error && '健康检查',
     mcpQuery.error && 'MCP Server',
     memoryQuery.error && 'Memory',
     checkpointQuery.error && 'Checkpoint / Recovery',
@@ -144,7 +149,7 @@ export function OverviewPage({ onOpenRuns }: { onOpenRuns: () => void }) {
             <div><span>Benchmark 总体成功率</span><b>{benchmarkQuery.error ? '未接入' : percent(avgBenchmark)}</b></div>
             <div><span>Checkpoint 数量</span><b>{checkpointQuery.error ? '未接入' : checkpoints.length}</b></div>
             <div><span>待复核案件</span><b>{openCases}</b></div>
-            <div><span>当前租户</span><b>{identity.tenantId}</b></div>
+            <div><span>当前租户</span><b>{isMockMode ? identity.tenantId : (auth.profile?.tenant_id || '-')}</b></div>
           </div>
           <DividerLite />
           <div className="health-line"><span className="health-dot" /><div><b>{isMockMode ? '前端数据模式' : 'Runtime API'}</b><small>{isMockMode ? '浏览器本地 DEMO / MOCK 数据' : 'FastAPI 服务'}</small></div><Tag color={isMockMode ? 'processing' : apiHealthy ? 'success' : apiHealthy === false ? 'error' : 'processing'}>{isMockMode ? 'MOCK' : apiHealthy ? '连接正常' : apiHealthy === false ? '连接异常' : '检查中'}</Tag></div>

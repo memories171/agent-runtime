@@ -255,10 +255,11 @@ async def _execute_node(
     if node.node_type == "sub_agent":
         child_state = dict(state)
         shutdown_reason = getattr(wf, "_shutdown_reason", None)
+        frozen = state.get("orchestration_limits") or {}
         child_state["child_cancel_grace_seconds"] = (
-            settings.orchestration_parent_cancel_grace_seconds
+            frozen.get("parent_cancel_grace_seconds", settings.orchestration_parent_cancel_grace_seconds)
             if shutdown_reason == "cancel"
-            else settings.orchestration_child_cancel_grace_seconds
+            else frozen.get("child_cancel_grace_seconds", settings.orchestration_child_cancel_grace_seconds)
         )
         child_state["shutdown_reason"] = shutdown_reason
         result = await execute_sub_agent_node(
@@ -317,8 +318,19 @@ async def _execute_node(
             )
             context_pack_id = assembled.get("context_pack_id")
             node_state["context_model_payload"] = assembled["model_payload"]
-        except Exception:
+        except Exception as context_exc:
+            # Do not silently fall back to the legacy truncated-history payload:
+            # a DB/RLS/storage failure must be visible in the node result.
             node_state.pop("context_model_payload", None)
+            node_state["context_degradation_reason"] = (
+                f"context_assembly_failed: {type(context_exc).__name__}"
+            )
+            await emit(
+                "NODE_FAILED",
+                node_id=node.node_id,
+                event="CONTEXT_ASSEMBLY_FAILED",
+                error=f"{type(context_exc).__name__}: {str(context_exc)[:300]}",
+            )
 
         decision = await workflow.execute_activity(
             agent_decide_activity,
@@ -552,16 +564,28 @@ async def _run_node_with_retry(
 async def execute_graph(wf: Any, run_input: Any, state: dict[str, Any]) -> dict[str, Any]:
     """在现有 Durable Workflow 内执行完整 DAG。"""
     graph_config = dict(getattr(run_input, "graph_config", None) or {})
+    frozen_limits = dict(getattr(run_input, "orchestration_limits", None) or {})
     if not graph_config.get("enabled", True):
         raise ValueError("graph mode is disabled")
     limits_data = {**DEFAULT_LIMITS, **(graph_config.get("limits") or {})}
     limits_data.setdefault(
         "allowed_agent_roles",
-        sorted(item.strip() for item in settings.orchestration_allowed_agent_roles.split(",") if item.strip()),
+        frozen_limits.get("allowed_agent_roles")
+        or sorted(item.strip() for item in settings.orchestration_allowed_agent_roles.split(",") if item.strip()),
     )
     limits = GraphLimits.model_validate(limits_data)
 
     state["workflow_input"] = run_input.model_dump(mode="json")
+    state["orchestration_limits"] = frozen_limits
+    orchestration_config = dict(getattr(run_input, "orchestration_config", None) or {})
+
+    def _limit(name: str, default: int, ceiling: int) -> int:
+        try:
+            value = int(orchestration_config.get(name, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(1, min(value, ceiling))
+
     state["orchestration"] = {
         "root_capability_token_id": str(uuid5(
             ORCHESTRATION_NAMESPACE,
@@ -570,11 +594,19 @@ async def execute_graph(wf: Any, run_input: Any, state: dict[str, Any]) -> dict[
         "root_capability_token_expires_at": (
             workflow.now() + timedelta(seconds=max(60, run_input.max_duration_seconds))
         ).isoformat(),
-        "max_depth": settings.orchestration_max_depth,
-        # Use the validated per-graph limit so graph_config.limits.max_node_steps
-        # is honored instead of being silently ignored in favour of the global.
+        # Caller config may tighten the validated limits, never widen them.
+        "max_depth": frozen_limits.get("max_depth", settings.orchestration_max_depth),
         "max_steps": limits.max_node_steps,
     }
+    # Caller config may tighten the validated limits, never widen them.
+    state["orchestration"]["max_depth"] = _limit(
+        "max_depth",
+        frozen_limits.get("max_depth", settings.orchestration_max_depth),
+        frozen_limits.get("max_depth", settings.orchestration_max_depth),
+    )
+    state["orchestration"]["max_steps"] = _limit(
+        "max_steps", limits.max_node_steps, limits.max_node_steps
+    )
     allowed_permissions = set(state.get("principal", {}).get("permissions") or [])
     allowed_permissions |= set(state.get("principal", {}).get("scopes") or [])
 

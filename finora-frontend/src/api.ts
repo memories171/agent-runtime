@@ -6,7 +6,7 @@ import type {
   ApprovalActionEnvelope, ApprovalRecord, RunEvent, RunRecord, RunTelemetry, SecuritySnapshot, ToolCallRecord, ToolInvocationRecord, WorkerFailure,
   ContextPack, ContextPackSummary, ContextSummaryRecord, ContextMetrics,
   NodeStatus, TaskGraphDetail, TaskGraphEvent, TaskGraphNodeDetail,
-  ChatConversation, ChatMessage, KnowledgeDocument, KnowledgeDocumentDetail, KnowledgeCitation,
+  ChatConversation, ChatMessage, KnowledgeDocument, KnowledgeDocumentDetail, KnowledgeCitation, KnowledgeChunkDetail,
 } from './types';
 
 export const isMockMode = (import.meta.env.VITE_DATA_MODE || 'mock').toLowerCase() !== 'api';
@@ -25,27 +25,48 @@ const defaultScopes = [
 ];
 const configuredScopes = import.meta.env.VITE_SCOPES || defaultScopes.join(',');
 
-export const identity: Identity = {
-  tenantId,
-  userId: import.meta.env.VITE_USER_ID || 'analyst-01',
-  scopes: configuredScopes,
-  displayName: '分析人员',
+export type DemoRole = 'general_manager' | 'analyst' | 'risk_controller';
+
+const DEMO_SCOPES: Record<DemoRole, string> = {
+  general_manager: [
+    'platform:manage', 'user:manage', 'security:read', 'audit:read',
+    'financial:audit:read', 'runs:read:tenant', 'skills:manage',
+    'approval:read', 'knowledge:read', 'knowledge:write',
+  ].join(','),
+  analyst: [
+    'agent:execute', 'run:create', 'run:read', 'run:pause', 'run:resume', 'run:context:read',
+    'financial:customer:read', 'financial:account:read', 'financial:transactions:read',
+    'financial:monitoring:run', 'financial:case:create', 'financial:case:read',
+    'memory:read', 'memory:read:team', 'memory:write', 'memory:write:team',
+    'knowledge:read', 'tool:execute',
+  ].join(','),
+  risk_controller: [
+    'run:read', 'runs:read:tenant', 'runs:cancel:tenant',
+    'financial:customer:read', 'financial:account:read', 'financial:transactions:read',
+    'financial:case:read', 'financial:case:review', 'financial:case:approve',
+    'approval:read', 'approval:approve', 'financial:audit:read', 'audit:read',
+    'knowledge:read', 'data:sensitive', 'tool:execute',
+  ].join(','),
 };
 
-export type DemoRole = 'analyst' | 'compliance' | 'auditor';
+const DEMO_IDENTITIES: Record<DemoRole, { userId: string; displayName: string }> = {
+  general_manager: { userId: 'manager-01', displayName: '总经理' },
+  analyst: { userId: import.meta.env.VITE_USER_ID || 'analyst-01', displayName: '分析人员' },
+  risk_controller: { userId: 'risk-01', displayName: '风控复核员' },
+};
+
+export const identity: Identity = {
+  tenantId,
+  userId: isMockMode ? DEMO_IDENTITIES.analyst.userId : (import.meta.env.VITE_USER_ID || 'analyst-01'),
+  scopes: isMockMode ? DEMO_SCOPES.analyst : configuredScopes,
+  displayName: isMockMode ? DEMO_IDENTITIES.analyst.displayName : '分析人员',
+};
 
 export function setDemoIdentity(role: DemoRole) {
-  if (role === 'compliance') {
-    identity.userId = 'compliance-01';
-    identity.displayName = '合规复核员';
-  } else if (role === 'auditor') {
-    identity.userId = 'auditor-01';
-    identity.displayName = '审计观察员';
-  } else {
-    identity.userId = import.meta.env.VITE_USER_ID || 'analyst-01';
-    identity.displayName = '分析人员';
-  }
+  identity.userId = DEMO_IDENTITIES[role].userId;
+  identity.displayName = DEMO_IDENTITIES[role].displayName;
   identity.tenantId = tenantId;
+  identity.scopes = DEMO_SCOPES[role];
 }
 
 export function setDemoTenant(nextTenantId: string) {
@@ -122,7 +143,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       headers.set('X-Scopes', identity.scopes);
     }
     if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-    return fetch(`/api${path}`, { ...init, headers });
+    // `/api` 是前端统一代理挂载点。已自带 /api/v1 的路由保留完整路径，
+    // 其余业务路由由代理去掉 /api 前缀后转发到后端根路径。
+    const target = path.startsWith('/api/') ? path : `/api${path}`;
+    return fetch(target, { ...init, headers });
   };
 
   let response = await doFetch(isMockMode ? null : await ensureFreshToken());
@@ -183,6 +207,22 @@ function makeDemoGraph(run: RunRecord): TaskGraphDetail {
     ],
     demo: true,
   };
+}
+
+function mockChunkDocument(content: string, chunkSize = 800): KnowledgeChunkDetail[] {
+  const size = Math.max(120, Math.min(4000, chunkSize || 800));
+  const chunks: KnowledgeChunkDetail[] = [];
+  for (let i = 0, index = 0; i < content.length; i += size, index += 1) {
+    const part = content.slice(i, i + size);
+    chunks.push({
+      chunk_id: `chunk-${index}-${newId('demo')}`,
+      chunk_index: index,
+      heading: `第 ${index + 1} 段`,
+      content: part,
+      char_count: part.length,
+    });
+  }
+  return chunks;
 }
 
 export const api = {
@@ -556,21 +596,27 @@ export const api = {
 
   pauseRun: async (runId: string) => {
     if (!isMockMode) return request(`/runs/${runId}/pause`, { method: 'POST' });
-    const run = getMockState().runs.find((item) => item.run_id === runId && item.tenant_id === identity.tenantId);
+    const state = getMockState();
+    const run = state.runs.find((item) => item.run_id === runId && item.tenant_id === identity.tenantId);
     if (!run) throw new Error('没有找到该任务');
     if (run.status !== 'RUNNING') throw new Error('只有运行中的任务可以暂停');
     run.status = 'PAUSED';
     run.updated_at = new Date().toISOString();
+    addMockAudit('RUN_PAUSED', 'AGENT_RUN', runId, identity.userId, runId);
+    commitMockState();
     return { run_id: runId, pause_state: 'PAUSED', accepted: true, demo: true };
   },
 
   resumeRun: async (runId: string) => {
     if (!isMockMode) return request(`/runs/${runId}/resume`, { method: 'POST' });
-    const run = getMockState().runs.find((item) => item.run_id === runId && item.tenant_id === identity.tenantId);
+    const state = getMockState();
+    const run = state.runs.find((item) => item.run_id === runId && item.tenant_id === identity.tenantId);
     if (!run) throw new Error('没有找到该任务');
     if (run.status !== 'PAUSED') throw new Error('只有已暂停的任务可以恢复');
     run.status = 'RUNNING';
     run.updated_at = new Date().toISOString();
+    addMockAudit('RUN_RESUMED', 'AGENT_RUN', runId, identity.userId, runId);
+    commitMockState();
     return { run_id: runId, pause_state: 'NONE', accepted: true, demo: true };
   },
 
@@ -598,29 +644,86 @@ export const api = {
 
   listApprovals: async (): Promise<ApprovalRecord[]> => {
     if (!isMockMode) return request<ApprovalRecord[]>('/approvals');
-    return (getMockState().security.approvals || []).map((item) => ({ ...item, demo: true }));
+    return (getMockState().security.approvals || []).map((item) => ({
+      ...item,
+      approval_status: item.approval_status ?? item.decision,
+      requested_by: item.requested_by ?? item.requester,
+      approver_id: item.approver_id ?? item.approver ?? null,
+      demo: true,
+    }));
   },
 
   listRunApprovals: async (runId: string): Promise<ApprovalRecord[]> => {
     if (!isMockMode) return request<ApprovalRecord[]>(`/runs/${runId}/approvals`);
-    return (getMockState().security.approvals || []).filter((item) => item.run_id === runId).map((item) => ({ ...item, demo: true }));
+    return (getMockState().security.approvals || [])
+      .filter((item) => item.run_id === runId)
+      .map((item) => ({
+        ...item,
+        approval_status: item.approval_status ?? item.decision,
+        requested_by: item.requested_by ?? item.requester,
+        approver_id: item.approver_id ?? item.approver ?? null,
+        demo: true,
+      }));
   },
 
   getApprovalActionEnvelope: async (approvalId: string): Promise<ApprovalActionEnvelope> => {
     if (!isMockMode) return request<ApprovalActionEnvelope>(`/approvals/${approvalId}/action-envelope`);
-    throw new ApiNotImplementedError('审批 Action Envelope');
+    const record = getMockState().security.approvals.find((item) => item.approval_id === approvalId);
+    if (!record) throw new Error('没有找到该审批单');
+    return {
+      approval_id: record.approval_id,
+      tenant_id: identity.tenantId,
+      run_id: record.run_id,
+      tool_call_id: record.tool_call_id || `${record.approval_id}-tool`,
+      tool_name: record.tool_name || 'financial.create_review_case',
+      target_resource_id: record.target_resource_id || '',
+      operation_type: record.operation_type || 'CASE_CREATE',
+      canonical_arguments: record.canonical_arguments || '{}',
+      canonical_arguments_hash: record.canonical_arguments_hash || 'demo-arguments-hash',
+      action_hash: record.action_hash || 'demo-action-hash',
+      requested_by: record.requested_by || record.requester,
+      policy_version: record.policy_version || 'v1',
+      risk_level: record.risk_level || 'HIGH',
+      nonce: record.nonce || 'demo-nonce',
+      issued_at: record.issued_at || record.time,
+      expires_at: record.expires_at || new Date(Date.now() + 3_600_000).toISOString(),
+      approval_status: (record.approval_status ?? record.decision) as ApprovalActionEnvelope['approval_status'],
+      signature_reference: null,
+    };
   },
 
   decideApproval: async (approvalId: string, approved: boolean, reason: string) => {
     if (!isMockMode) return request(`/approvals/${approvalId}/${approved ? 'approve' : 'reject'}`, {
       method: 'POST', body: JSON.stringify({ approved, reason }),
     });
-    throw new ApiNotImplementedError('审批决策（Mock 模式请使用 approveRun）');
+    const state = getMockState();
+    const record = state.security.approvals.find((item) => item.approval_id === approvalId);
+    if (!record) throw new Error('没有找到该审批单');
+    const status = record.approval_status ?? record.decision;
+    if (status !== 'PENDING') throw new Error('该审批单已处理，不能再次决策');
+    record.approval_status = approved ? 'APPROVED' : 'REJECTED';
+    record.decision = approved ? 'APPROVED' : 'REJECTED';
+    record.approver_id = identity.userId;
+    record.approver = identity.userId;
+    record.reason = reason;
+    record.version = (record.version || 0) + 1;
+    addMockAudit(approved ? 'APPROVAL_APPROVED' : 'APPROVAL_REJECTED', 'APPROVAL', approvalId, identity.userId, record.run_id);
+    return { approval_id: approvalId, accepted: true, approved, demo: true };
   },
 
   revokeApproval: async (approvalId: string) => {
     if (!isMockMode) return request(`/approvals/${approvalId}/revoke`, { method: 'POST' });
-    throw new ApiNotImplementedError('审批撤销（Mock 模式不支持）');
+    const state = getMockState();
+    const record = state.security.approvals.find((item) => item.approval_id === approvalId);
+    if (!record) throw new Error('没有找到该审批单');
+    const status = record.approval_status ?? record.decision;
+    if (status !== 'PENDING' && status !== 'APPROVED') throw new Error('该审批单当前状态不能撤销');
+    record.approval_status = 'REVOKED';
+    record.approver_id = identity.userId;
+    record.approver = identity.userId;
+    record.version = (record.version || 0) + 1;
+    addMockAudit('APPROVAL_REVOKED', 'APPROVAL', approvalId, identity.userId, record.run_id);
+    return { approval_id: approvalId, revoked: true, demo: true };
   },
 
   getSecuritySnapshot: async (): Promise<SecuritySnapshot> => {
@@ -723,31 +826,62 @@ export const api = {
 
   listConversations: async (): Promise<ChatConversation[]> => {
     if (!isMockMode) return request<ChatConversation[]>('/chat/conversations');
-    throw new ApiNotImplementedError('对话会话（Mock 模式请使用 API 模式）');
+    return getMockState().conversations.slice()
+      .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
   },
 
   createConversation: async (title = '新对话'): Promise<ChatConversation> => {
     if (!isMockMode) return request<ChatConversation>('/chat/conversations', {
       method: 'POST', body: JSON.stringify({ title }),
     });
-    throw new ApiNotImplementedError('新建对话（Mock 模式请使用 API 模式）');
+    const state = getMockState();
+    const now = new Date().toISOString();
+    const conv: ChatConversation = {
+      conversation_id: newId('conv'), title,
+      session_id: `session-${newId('chat')}`, created_at: now, updated_at: now,
+    };
+    state.conversations.unshift(conv);
+    state.chatMessagesByConversation[conv.conversation_id] = [];
+    addMockAudit('CHAT_CONVERSATION_CREATED', 'CHAT_CONVERSATION', conv.conversation_id, identity.userId);
+    return conv;
   },
 
   deleteConversation: async (conversationId: string): Promise<void> => {
     if (!isMockMode) { await request(`/chat/conversations/${conversationId}`, { method: 'DELETE' }); return; }
-    throw new ApiNotImplementedError('删除对话（Mock 模式请使用 API 模式）');
+    const state = getMockState();
+    state.conversations = state.conversations.filter((item) => item.conversation_id !== conversationId);
+    delete state.chatMessagesByConversation[conversationId];
+    addMockAudit('CHAT_CONVERSATION_DELETED', 'CHAT_CONVERSATION', conversationId, identity.userId);
   },
 
   listChatMessages: async (conversationId: string): Promise<ChatMessage[]> => {
     if (!isMockMode) return request<ChatMessage[]>(`/chat/conversations/${conversationId}/messages`);
-    throw new ApiNotImplementedError('对话消息（Mock 模式请使用 API 模式）');
+    return (getMockState().chatMessagesByConversation[conversationId] || []).slice();
   },
 
   sendChatMessage: async (conversationId: string, content: string, useMemory = true, deepThink = false): Promise<ChatMessage & { usage?: Record<string, number>; memory_hits?: number }> => {
     if (!isMockMode) return request(`/chat/conversations/${conversationId}/messages`, {
       method: 'POST', body: JSON.stringify({ content, use_memory: useMemory, memory_limit: 6, deep_think: deepThink }),
     });
-    throw new ApiNotImplementedError('发送对话消息（Mock 模式请使用 API 模式）');
+    const reply = `演示答复：已收到“${content.slice(0, 40)}”。当前为浏览器内合成数据，不作为业务结论。`;
+    const now = new Date().toISOString();
+    const userMessage: ChatMessage = {
+      message_id: newId('msg'), conversation_id: conversationId, role: 'user', content,
+      created_at: now,
+    };
+    const message: ChatMessage & { usage?: Record<string, number>; memory_hits?: number } = {
+      message_id: newId('msg'), conversation_id: conversationId, role: 'assistant', content: reply,
+      reasoning: deepThink ? '演示推理：先定位知识条目，再说明适用边界。' : undefined,
+      created_at: now,
+      usage: { prompt_tokens: 120, completion_tokens: 80 },
+      memory_hits: useMemory ? 1 : 0,
+    };
+    const state = getMockState();
+    const list = state.chatMessagesByConversation[conversationId] || [];
+    list.push(userMessage, message);
+    state.chatMessagesByConversation[conversationId] = list;
+    addMockAudit('CHAT_MESSAGE_SENT', 'CHAT_CONVERSATION', conversationId, identity.userId);
+    return message;
   },
 
   streamChatMessage: async (
@@ -765,16 +899,73 @@ export const api = {
     deepThink = false,
     signal?: AbortSignal,
   ): Promise<void> => {
-    if (isMockMode) throw new ApiNotImplementedError('流式对话（Mock 模式请使用 API 模式）');
-    const token = await ensureFreshToken();
-    const response = await fetch(`/api/chat/conversations/${conversationId}/messages/stream`, {
+    if (isMockMode) {
+      const reply = `演示流式答复：已收到“${content.slice(0, 40)}”。当前为浏览器内合成数据，不作为业务结论。`;
+      const reasoning = deepThink ? '演示推理：先定位知识条目，再说明适用边界。' : undefined;
+      handlers.onStatus('working', '演示模式：正在生成答复');
+      if (reasoning) handlers.onReasoning(reasoning);
+      await Promise.resolve();
+      for (const part of reply.match(/.{1,12}/g) || [reply]) {
+        if (signal?.aborted) return;
+        handlers.onDelta(part);
+        await Promise.resolve();
+      }
+      if (signal?.aborted) return;
+      const now = new Date().toISOString();
+      const userMessage: ChatMessage = {
+        message_id: newId('msg'), conversation_id: conversationId, role: 'user', content,
+        created_at: now,
+      };
+      const message = {
+        message_id: newId('msg'),
+        conversation_id: conversationId,
+        role: 'assistant' as const,
+        content: reply,
+        ...(reasoning ? { reasoning } : {}),
+        created_at: new Date().toISOString(),
+        usage: { prompt_tokens: 120, completion_tokens: 80 },
+        memory_hits: useMemory ? 1 : 0,
+      };
+      const state = getMockState();
+      const list = state.chatMessagesByConversation[conversationId] || [];
+      list.push(userMessage, message);
+      state.chatMessagesByConversation[conversationId] = list;
+      addMockAudit('CHAT_MESSAGE_STREAMED', 'CHAT_CONVERSATION', conversationId, identity.userId);
+      handlers.onDone(message);
+      return;
+    }
+    const doStreamFetch = (token: string | null) => fetch(`/api/chat/conversations/${conversationId}/messages/stream`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(apiTenantId ? { 'X-Tenant-ID': apiTenantId } : {}),
+      },
       body: JSON.stringify({ content, use_memory: useMemory, memory_limit: 6, deep_think: deepThink }),
       signal,
     });
+    let response = await doStreamFetch(await ensureFreshToken());
+    if (response.status === 401) {
+      const refreshed = await renewToken();
+      if (refreshed) response = await doStreamFetch(refreshed);
+    }
+    if (response.status === 401) {
+      authHandlers.onUnauthorized?.();
+      handlers.onError('登录状态已失效，请重新登录');
+      return;
+    }
+    if (response.status === 403) {
+      let detail = '没有执行该操作的权限';
+      try { detail = (await response.json())?.detail || detail; } catch { /* keep default */ }
+      const error = new ForbiddenError(detail);
+      authHandlers.onForbidden?.(error);
+      handlers.onError(detail);
+      return;
+    }
     if (!response.ok || !response.body) {
-      handlers.onError(`HTTP ${response.status}`);
+      let detail = `HTTP ${response.status}`;
+      try { detail = (await response.json())?.detail || detail; } catch { /* keep status */ }
+      handlers.onError(detail);
       return;
     }
     const reader = response.body.getReader();
@@ -817,12 +1008,17 @@ export const api = {
 
   listKnowledgeDocuments: async (): Promise<KnowledgeDocument[]> => {
     if (!isMockMode) return request<KnowledgeDocument[]>('/knowledge/documents');
-    throw new ApiNotImplementedError('知识库文档列表（Mock 模式请使用 API 模式）');
+    return getMockState().knowledgeDocuments.slice()
+      .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
   },
 
   getKnowledgeDocument: async (documentId: string): Promise<KnowledgeDocumentDetail> => {
     if (!isMockMode) return request<KnowledgeDocumentDetail>(`/knowledge/documents/${encodeURIComponent(documentId)}/chunks`);
-    throw new ApiNotImplementedError('知识库原文详情（Mock 模式请使用 API 模式）');
+    const state = getMockState();
+    const doc = state.knowledgeDocuments.find((item) => item.document_id === documentId);
+    if (!doc) throw new Error('没有找到该文档');
+    const chunks = state.knowledgeChunksByDocument[documentId] || [];
+    return { ...doc, raw_content: chunks.map((chunk) => chunk.content).join('\n\n'), chunks };
   },
 
   createKnowledgeDocument: async (body: {
@@ -830,7 +1026,19 @@ export const api = {
     chunk_size?: number; chunk_overlap?: number;
   }): Promise<{ document_id: string; title: string; chunk_count: number; char_count: number }> => {
     if (!isMockMode) return request('/knowledge/documents', { method: 'POST', body: JSON.stringify(body) });
-    throw new ApiNotImplementedError('新建知识库文档（Mock 模式请使用 API 模式）');
+    const state = getMockState();
+    const documentId = newId('doc');
+    const chunks = mockChunkDocument(body.content, body.chunk_size);
+    const doc: KnowledgeDocument = {
+      document_id: documentId, title: body.title,
+      source: body.source || '浏览器导入', content_type: body.content_type || 'auto',
+      char_count: body.content.length, chunk_count: chunks.length,
+      status: 'READY', created_at: new Date().toISOString(),
+    };
+    state.knowledgeDocuments.unshift(doc);
+    state.knowledgeChunksByDocument[documentId] = chunks;
+    addMockAudit('KNOWLEDGE_DOCUMENT_CREATED', 'KNOWLEDGE_DOCUMENT', documentId, identity.userId);
+    return { document_id: documentId, title: doc.title, chunk_count: chunks.length, char_count: doc.char_count };
   },
 
   updateKnowledgeDocument: async (documentId: string, body: {
@@ -841,29 +1049,64 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(body),
     });
-    throw new ApiNotImplementedError('更新知识库文档（Mock 模式请使用 API 模式）');
+    const state = getMockState();
+    const doc = state.knowledgeDocuments.find((item) => item.document_id === documentId);
+    if (!doc) throw new Error('没有找到该文档');
+    const chunks = mockChunkDocument(body.content, body.chunk_size);
+    doc.title = body.title;
+    doc.source = body.source || doc.source;
+    doc.content_type = body.content_type || doc.content_type;
+    doc.char_count = body.content.length;
+    doc.chunk_count = chunks.length;
+    doc.status = 'READY';
+    state.knowledgeChunksByDocument[documentId] = chunks;
+    addMockAudit('KNOWLEDGE_DOCUMENT_UPDATED', 'KNOWLEDGE_DOCUMENT', documentId, identity.userId);
+    return { document_id: documentId, title: doc.title, chunk_count: chunks.length, char_count: doc.char_count, status: doc.status };
   },
 
   deleteKnowledgeDocument: async (documentId: string): Promise<void> => {
     if (!isMockMode) { await request(`/knowledge/documents/${documentId}`, { method: 'DELETE' }); return; }
-    throw new ApiNotImplementedError('删除知识库文档（Mock 模式请使用 API 模式）');
+    const state = getMockState();
+    state.knowledgeDocuments = state.knowledgeDocuments.filter((item) => item.document_id !== documentId);
+    delete state.knowledgeChunksByDocument[documentId];
+    addMockAudit('KNOWLEDGE_DOCUMENT_DELETED', 'KNOWLEDGE_DOCUMENT', documentId, identity.userId);
   },
 
   searchKnowledge: async (query: string, topK = 5): Promise<KnowledgeCitation[]> => {
     if (!isMockMode) return request<KnowledgeCitation[]>('/knowledge/search', {
       method: 'POST', body: JSON.stringify({ query, top_k: topK }),
     });
-    throw new ApiNotImplementedError('知识库检索（Mock 模式请使用 API 模式）');
+    const state = getMockState();
+    const needle = query.toLowerCase();
+    const results: KnowledgeCitation[] = [];
+    for (const doc of state.knowledgeDocuments) {
+      for (const chunk of state.knowledgeChunksByDocument[doc.document_id] || []) {
+        if (chunk.content.toLowerCase().includes(needle) || doc.title.toLowerCase().includes(needle)) {
+          results.push({
+            chunk_id: chunk.chunk_id, index: results.length + 1,
+            document_id: doc.document_id, document_title: doc.title,
+            source: doc.source, heading: chunk.heading,
+            chunk_index: chunk.chunk_index, content: chunk.content, score: 0.8,
+          });
+          if (results.length >= topK) return results;
+        }
+      }
+    }
+    return results;
   },
 
   knowledgeStats: async (): Promise<{ documents: number; chunks: number }> => {
     if (!isMockMode) return request('/knowledge/stats');
-    throw new ApiNotImplementedError('知识库统计（Mock 模式请使用 API 模式）');
+    const state = getMockState();
+    return {
+      documents: state.knowledgeDocuments.length,
+      chunks: Object.values(state.knowledgeChunksByDocument).reduce((sum, list) => sum + list.length, 0),
+    };
   },
 
-  cancelChatStream: async (conversationId: string): Promise<void> => {
-    if (!isMockMode) { await request(`/chat/conversations/${conversationId}/cancel`, { method: 'POST' }); return; }
-    throw new ApiNotImplementedError('取消流式生成（Mock 模式请使用 API 模式）');
+  cancelChatStream: async (_conversationId: string): Promise<void> => {
+    if (!isMockMode) { await request(`/chat/conversations/${_conversationId}/cancel`, { method: 'POST' }); return; }
+    // Mock streaming is synchronous; abort signal on the caller side is enough.
   },
 
   saveStoppedMessage: async (conversationId: string, partial: {
@@ -872,7 +1115,18 @@ export const api = {
     if (!isMockMode) return request(`/chat/conversations/${conversationId}/messages/stopped`, {
       method: 'POST', body: JSON.stringify(partial),
     });
-    throw new ApiNotImplementedError('保存停止消息（Mock 模式请使用 API 模式）');
+    const message: ChatMessage = {
+      message_id: newId('msg'), conversation_id: conversationId, role: 'assistant',
+      content: partial.content, ...(partial.reasoning ? { reasoning: partial.reasoning } : {}),
+      ...(partial.tool_calls ? { tool_calls: partial.tool_calls } : {}),
+      created_at: new Date().toISOString(),
+    };
+    const state = getMockState();
+    const list = state.chatMessagesByConversation[conversationId] || [];
+    list.push(message);
+    state.chatMessagesByConversation[conversationId] = list;
+    addMockAudit('CHAT_MESSAGE_STOPPED', 'CHAT_CONVERSATION', conversationId, identity.userId);
+    return message;
   },
 
   resetMockData: () => {

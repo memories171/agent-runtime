@@ -102,12 +102,14 @@ export function McpSkillsPage() {
         },
         {
           key: 'gateway', label: <span><ToolOutlined /> 工具网关</span>,
-          children: <>
-            <Alert className="inline-alert" type="info" showIcon message="工具是 Agent 可调用的具体能力"
-              description="这里只展示工具的业务用途；权限、风险和幂等保护由后端在调用时强制执行。" />
-            <Table rowKey="name" columns={gatewayColumns} dataSource={gatewayToolsQuery.data || []} loading={gatewayToolsQuery.loading} pagination={false}
-              locale={{ emptyText: <Empty description="工具注册表暂不可用" /> }} />
-          </>,
+          children: gatewayToolsQuery.error
+            ? <ApiUnavailable error={gatewayToolsQuery.error} feature="工具网关" />
+            : <>
+              <Alert className="inline-alert" type="info" showIcon message="工具是 Agent 可调用的具体能力"
+                description="这里只展示工具的业务用途；权限、风险和幂等保护由后端在调用时强制执行。" />
+              <Table rowKey="name" columns={gatewayColumns} dataSource={gatewayToolsQuery.data || []} loading={gatewayToolsQuery.loading} pagination={false}
+                locale={{ emptyText: <Empty description="工具注册表暂不可用" /> }} />
+            </>,
         },
       ]} />
     </Card>

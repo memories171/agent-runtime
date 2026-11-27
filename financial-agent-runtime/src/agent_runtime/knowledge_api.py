@@ -16,6 +16,20 @@ from agent_runtime.knowledge.service import delete_document, ingest_document, li
 router = APIRouter()
 
 
+def _require_knowledge_scope(principal: Principal, write: bool = False) -> None:
+    """Enforce knowledge scopes while keeping legacy role compatibility.
+
+    Dedicated `knowledge:read/write` scopes are the job-split contract.
+    `agent:execute` and platform/skills manage are accepted only as legacy
+    fallbacks so existing tokens do not break before Keycloak is re-seeded.
+    """
+    read_scopes = {"knowledge:read", "agent:execute"}
+    if not (read_scopes & principal.scopes):
+        raise HTTPException(status_code=403, detail="knowledge:read scope required")
+    if write and not ({"knowledge:write", "platform:manage", "skills:manage"} & principal.scopes):
+        raise HTTPException(status_code=403, detail="knowledge:write scope required")
+
+
 class DocumentCreate(BaseModel):
     title: str = Field(default="", max_length=256)
     content: str = Field(min_length=1, max_length=500_000)
@@ -46,6 +60,7 @@ async def get_documents(
     principal: Principal = Depends(get_principal),
     session: AsyncSession = Depends(get_session),
 ):
+    _require_knowledge_scope(principal)
     return await list_documents(session, principal.tenant_id, limit)
 
 
@@ -55,6 +70,7 @@ async def get_document_chunks(
     principal: Principal = Depends(get_principal),
     session: AsyncSession = Depends(get_session),
 ):
+    _require_knowledge_scope(principal)
     try:
         doc_uuid = UUID(document_id)
     except ValueError:
@@ -103,6 +119,7 @@ async def create_document(
     principal: Principal = Depends(get_principal),
     session: AsyncSession = Depends(get_session),
 ):
+    _require_knowledge_scope(principal, write=True)
     try:
         return await ingest_document(
             session, principal.tenant_id, body.title, body.content,
@@ -120,6 +137,7 @@ async def modify_document(
     principal: Principal = Depends(get_principal),
     session: AsyncSession = Depends(get_session),
 ):
+    _require_knowledge_scope(principal, write=True)
     try:
         result = await update_document(
             session, principal.tenant_id, document_id, body.title, body.content,
@@ -139,6 +157,7 @@ async def remove_document(
     principal: Principal = Depends(get_principal),
     session: AsyncSession = Depends(get_session),
 ):
+    _require_knowledge_scope(principal, write=True)
     if not await delete_document(session, principal.tenant_id, document_id):
         raise HTTPException(status_code=404, detail="document not found")
 
@@ -149,6 +168,7 @@ async def search(
     principal: Principal = Depends(get_principal),
     session: AsyncSession = Depends(get_session),
 ):
+    _require_knowledge_scope(principal)
     return await search_chunks(session, principal.tenant_id, body.query, body.top_k, filters=body.filters)
 
 
@@ -157,6 +177,7 @@ async def stats(
     principal: Principal = Depends(get_principal),
     session: AsyncSession = Depends(get_session),
 ):
+    _require_knowledge_scope(principal)
     doc_count = (await session.execute(
         select(func.count()).select_from(KnowledgeDocumentRecord)
         .where(KnowledgeDocumentRecord.tenant_id == principal.tenant_id)

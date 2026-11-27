@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent_runtime.auth import can_access_run, can_manage_run, get_principal
+from agent_runtime.auth import can_access_run, can_cancel_run, can_manage_run, get_principal
 from agent_runtime.auth_router import router as auth_router
 from agent_runtime.benchmark_api import router as benchmark_router
 from agent_runtime.chat_api import router as chat_router
@@ -88,17 +88,15 @@ app.include_router(knowledge_router)
 _AUDIT_EXCLUDED_PREFIXES = ("/auth", "/health", "/docs", "/openapi.json", "/redoc")
 
 
-@app.middleware("http")
-async def record_work_audit(request: Request, call_next):
-    response = await call_next(request)
+async def _write_work_audit(request: Request, status_code: int) -> None:
     if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
-        return response
+        return
     path = request.url.path
     if any(path.startswith(prefix) for prefix in _AUDIT_EXCLUDED_PREFIXES):
-        return response
+        return
     principal = getattr(request.state, "principal", None)
     if principal is None:
-        return response
+        return
 
     try:
         action = f"{request.method}_{path.strip('/').replace('/', '_')}"[:64]
@@ -121,12 +119,22 @@ async def record_work_audit(request: Request, call_next):
                     "method": request.method,
                     "path": path,
                     "query": dict(request.query_params),
-                    "status_code": response.status_code,
+                    "status_code": status_code,
                 },
             ))
             await audit_session.commit()
     except Exception:
         logging.getLogger(__name__).warning("work audit write failed", exc_info=True)
+
+
+@app.middleware("http")
+async def record_work_audit(request: Request, call_next):
+    try:
+        response = await call_next(request)
+    except Exception:
+        await _write_work_audit(request, 500)
+        raise
+    await _write_work_audit(request, response.status_code)
     return response
 
 
@@ -180,6 +188,8 @@ def _run_read(
         agent_id=run.agent_id,
         prompt=run.prompt,
         status=run.status,
+        pause_state=run.pause_state,
+        version=run.version,
         result=run.result,
         error=run.error,
         created_at=created,
@@ -208,6 +218,8 @@ async def _get_owned_run(
         allowed = can_access_run(principal, run.user_id)
     elif access_mode == "manage":
         allowed = can_manage_run(principal, run.user_id)
+    elif access_mode == "cancel":
+        allowed = can_cancel_run(principal, run.user_id)
     elif access_mode == "approve":
         allowed = principal.user_id == run.user_id or "approval:approve" in principal.scopes
     else:
@@ -360,8 +372,15 @@ async def create_run(
         agent_id=body.agent_id,
         prompt=body.prompt,
         status="QUEUED",
-        metadata_json={**body.metadata, "model_name": body.model_name or settings.model_name, "harness_version": settings.harness_version},
+        metadata_json={
+            **body.metadata,
+            "model_name": body.model_name or settings.model_name,
+            "harness_version": settings.harness_version,
+            "orchestration": body.orchestration or {},
+        },
     )
+    if body.graph and not settings.graph_enabled:
+        raise HTTPException(status_code=403, detail="task graph is disabled by server configuration")
     session.add(run)
     await session.flush()
     max_duration = body.max_duration_seconds or settings.max_run_duration_seconds
@@ -374,6 +393,12 @@ async def create_run(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    run.metadata_json = {
+        **run.metadata_json,
+        "max_duration_seconds": max_duration,
+        "max_steps": max_steps,
+        "budget_adjustment": budget_adjustment,
+    }
     workflow_input = WorkflowInput(
         run_id=str(run_id),
         tenant_id=principal.tenant_id,
@@ -394,6 +419,8 @@ async def create_run(
         harness_version=settings.harness_version,
         context_config=dict((body.metadata or {}).get("context_config") or {}),
         graph_config=dict(body.graph or {}),
+        orchestration_config=dict(body.orchestration or {}),
+        orchestration_limits=_frozen_orchestration_limits(),
         child_cancel_grace_seconds=settings.orchestration_child_cancel_grace_seconds,
     )
     # The Run and dispatch intent commit atomically. Worker retries outbox delivery.
@@ -463,6 +490,18 @@ async def _workflow_missing(tenant_id: str, run_id: UUID) -> bool:
         if "not found" in str(exc).lower():
             return True
         return False
+
+
+def _frozen_orchestration_limits() -> dict:
+    """Snapshot orchestration settings into WorkflowInput for replay safety."""
+    return {
+        "parent_cancel_grace_seconds": settings.orchestration_parent_cancel_grace_seconds,
+        "child_cancel_grace_seconds": settings.orchestration_child_cancel_grace_seconds,
+        "allowed_agent_roles": sorted(
+            item.strip() for item in settings.orchestration_allowed_agent_roles.split(",") if item.strip()
+        ),
+        "max_depth": settings.orchestration_max_depth,
+    }
 
 
 async def _require_scope(principal: Principal, scope: str) -> None:
@@ -635,7 +674,7 @@ async def restore_run(
     try:
         max_steps, _ = resolve_step_budget(
             duration_seconds=max_duration,
-            requested_steps=None,
+            requested_steps=source.metadata_json.get("max_steps"),
             default_steps=settings.max_agent_steps,
             seconds_per_step=settings.estimated_seconds_per_step,
         )
@@ -682,6 +721,8 @@ async def restore_run(
         harness_version=settings.harness_version,
         context_config=dict((source.metadata_json or {}).get("context_config") or {}),
         graph_config=dict((source.metadata_json or {}).get("graph") or {}),
+        orchestration_config=dict((source.metadata_json or {}).get("orchestration") or {}),
+        orchestration_limits=_frozen_orchestration_limits(),
         child_cancel_grace_seconds=settings.orchestration_child_cancel_grace_seconds,
         restore_contract=contract.model_dump(mode="json"),
     )
@@ -708,8 +749,18 @@ async def restore_run(
 async def _cancel_pre_dispatch(
     session: AsyncSession, run: RunRecord, run_id: UUID, principal: Principal, mode: str
 ) -> None:
+    # Lock both the Run and its outbox commands in one transaction, so a
+    # dispatcher cannot start the workflow after seeing a pre-cancel snapshot.
+    run = (await session.execute(
+        select(RunRecord).where(RunRecord.run_id == run_id).with_for_update()
+    )).scalar_one_or_none()
+    if run is None:
+        return
     outboxes = (await session.execute(
-        select(WorkflowOutbox).where(WorkflowOutbox.run_id == run_id, WorkflowOutbox.status == "PENDING")
+        select(WorkflowOutbox).where(
+            WorkflowOutbox.run_id == run_id,
+            WorkflowOutbox.status.in_(["PENDING", "DISPATCHING"]),
+        ).with_for_update()
     )).scalars()
     for outbox in outboxes:
         outbox.status = "CANCELLED"
@@ -720,7 +771,7 @@ async def _cancel_pre_dispatch(
 
 @app.post("/runs/{run_id}/cancel")
 async def cancel_run(run_id: UUID, principal: Principal = Depends(get_principal), session: AsyncSession = Depends(get_session)):
-    run = await _get_owned_run(session, run_id, principal, access_mode="manage")
+    run = await _get_owned_run(session, run_id, principal, access_mode="cancel")
     if run.status in {"CREATED", "QUEUED"}:
         await _cancel_pre_dispatch(session, run, run_id, principal, "pre_dispatch")
         await session.commit()
@@ -768,35 +819,25 @@ async def provide_approval(run_id: UUID, body: ApprovalRequest, principal: Princ
     )
     approval_context = required_event.scalar_one_or_none()
     tool_name = (approval_context.payload or {}).get("tool") if approval_context else None
-    from agent_runtime.tools.registry import registry as tool_registry
-    approved_tool = tool_registry.get(tool_name) if tool_name else None
-    if approved_tool and approved_tool.requires_distinct_approver:
-        if principal.user_id == run.user_id:
-            raise HTTPException(status_code=403, detail="该金融操作要求双人复核：审批人不能是任务发起人")
-        if "financial:case:approve" not in principal.scopes:
-            raise HTTPException(status_code=403, detail="financial:case:approve scope required")
-        approval_resource_type = (approval_context.payload or {}).get("approval_resource_type") if approval_context else None
-        approval_resource_id = (approval_context.payload or {}).get("approval_resource_id") if approval_context else None
-        if approval_resource_type and approval_resource_id:
-            grant = await session.execute(select(FinancialResourceGrant.grant_id).where(
-                FinancialResourceGrant.tenant_id == principal.tenant_id,
-                FinancialResourceGrant.user_id == principal.user_id,
-                FinancialResourceGrant.resource_type.in_([approval_resource_type, "*"]),
-                FinancialResourceGrant.resource_id.in_([approval_resource_id, "*"]),
-                FinancialResourceGrant.permission.in_(["case:approve", "*"]),
-            ).limit(1))
-            if grant.scalar_one_or_none() is None:
-                raise HTTPException(status_code=403, detail="审批人没有该金融资源的案件审批授权")
+    await _enforce_financial_approval_policy(
+        session, principal,
+        run_id=run_id,
+        tool_name=tool_name,
+        requester_user_id=run.user_id,
+    )
     payload = {"approved": body.approved, "reason": body.reason, "approver_user_id": principal.user_id,
                "approved_at": datetime.now(timezone.utc).isoformat(), "tool": tool_name}
     # 审批决策走状态机（条件更新/幂等/过期），与 Outbox 记录同事务提交。
-    from agent_runtime.approval.service import ApprovalError, ApprovalService
+    from agent_runtime.approval.service import ApprovalError, ApprovalService, ApprovalStateChangedError
     svc = ApprovalService()
     approval_id = (approval_context.payload or {}).get("approval_id") if approval_context else None
     if approval_id:
         try:
             await svc.decide(session, tenant_id=principal.tenant_id, approval_id=approval_id,
                              approved=body.approved, approver_id=principal.user_id, reason=body.reason)
+        except ApprovalStateChangedError as exc:
+            await session.commit()
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         except ApprovalError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     from agent_runtime.outbox.commands import enqueue_command
@@ -842,6 +883,8 @@ async def list_financial_review_cases(
     if "financial:case:read" not in principal.scopes:
         raise HTTPException(status_code=403, detail="financial:case:read scope required")
     stmt = select(FinancialReviewCase).where(FinancialReviewCase.tenant_id == principal.tenant_id)
+    if "runs:read:tenant" not in principal.scopes and "financial:audit:read" not in principal.scopes:
+        stmt = stmt.where(FinancialReviewCase.created_by == principal.user_id)
     if status:
         stmt = stmt.where(FinancialReviewCase.status == status.upper())
     rows = list((await session.execute(stmt.order_by(FinancialReviewCase.created_at.desc()).limit(max(1, min(limit, 100))))).scalars())
@@ -883,12 +926,42 @@ async def act_on_financial_review_case(
         select(FinancialReviewCase).where(
             FinancialReviewCase.tenant_id == principal.tenant_id,
             FinancialReviewCase.case_id == case_id,
-        )
+        ).with_for_update()
     )).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="review case not found")
     if row.status in {"APPROVED", "REJECTED", "ARCHIVED"}:
         raise HTTPException(status_code=409, detail="review case already closed")
+
+    allowed_transitions = {
+        "START_REVIEW": {"OPEN"},
+        "APPROVE": {"IN_REVIEW", "ESCALATED"},
+        "REJECT": {"IN_REVIEW", "ESCALATED"},
+        "ESCALATE": {"IN_REVIEW"},
+        "ARCHIVE": {"APPROVED", "REJECTED", "ESCALATED"},
+    }
+    if row.status not in allowed_transitions[action]:
+        raise HTTPException(status_code=409, detail=f"invalid review transition from {row.status}")
+
+    # 双人复核与资源授权：复核人不能是案件发起人，且必须持有该案件主体的授权。
+    if principal.user_id == row.created_by:
+        raise HTTPException(status_code=403, detail="该金融操作要求双人复核：复核人不能是案件发起人")
+    if "financial:case:approve" not in principal.scopes:
+        raise HTTPException(status_code=403, detail="financial:case:approve scope required")
+    resource_type = {
+        "KYC": "customer", "AML": "transaction", "TRANSACTION_REVIEW": "account",
+    }.get(row.case_type)
+    if resource_type is None or not row.subject_id:
+        raise HTTPException(status_code=422, detail=f"unsupported case type: {row.case_type}")
+    grant = await session.execute(select(FinancialResourceGrant.grant_id).where(
+        FinancialResourceGrant.tenant_id == principal.tenant_id,
+        FinancialResourceGrant.user_id == principal.user_id,
+        FinancialResourceGrant.resource_type.in_([resource_type, "*"]),
+        FinancialResourceGrant.resource_id.in_([row.subject_id, "*"]),
+        FinancialResourceGrant.permission.in_(["case:approve", "case:review", "*"]),
+    ).limit(1))
+    if grant.scalar_one_or_none() is None:
+        raise HTTPException(status_code=403, detail="复核人没有该案件主体的资源授权")
 
     now = datetime.now(timezone.utc)
     row.status = status_map[action]
@@ -982,6 +1055,56 @@ def _require_approval_reader(principal: Principal) -> None:
         raise HTTPException(status_code=403, detail="approval read permission required")
 
 
+async def _enforce_financial_approval_policy(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    run_id: UUID,
+    tool_name: str | None,
+    requester_user_id: str,
+) -> None:
+    """Shared dual-control check for high-risk financial tools.
+
+    Both the run-scoped approval route and the approval-id routes call this so
+    that a caller cannot bypass distinct-approver / resource-grant checks by
+    choosing a different endpoint.
+    """
+    from agent_runtime.tools.registry import registry as tool_registry
+
+    approved_tool = tool_registry.get(tool_name) if tool_name else None
+    if not approved_tool or not approved_tool.requires_distinct_approver:
+        return
+    if principal.user_id == requester_user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="该金融操作要求双人复核：审批人不能是任务发起人",
+        )
+    if "financial:case:approve" not in principal.scopes:
+        raise HTTPException(status_code=403, detail="financial:case:approve scope required")
+
+    required_event = await session.execute(
+        select(RunEvent).where(
+            RunEvent.run_id == run_id,
+            RunEvent.tenant_id == principal.tenant_id,
+            RunEvent.event_type == "APPROVAL_REQUIRED",
+        ).order_by(desc(RunEvent.created_at)).limit(1)
+    )
+    context = required_event.scalar_one_or_none()
+    payload = (context.payload or {}) if context else {}
+    resource_type = payload.get("approval_resource_type")
+    resource_id = payload.get("approval_resource_id") or payload.get("target_resource_id")
+    if resource_type and resource_id:
+        grant = await session.execute(select(FinancialResourceGrant.grant_id).where(
+            FinancialResourceGrant.tenant_id == principal.tenant_id,
+            FinancialResourceGrant.user_id == principal.user_id,
+            FinancialResourceGrant.resource_type.in_([resource_type, "*"]),
+            FinancialResourceGrant.resource_id.in_([resource_id, "*"]),
+            FinancialResourceGrant.permission.in_(["case:approve", "*"]),
+        ).limit(1))
+        if grant.scalar_one_or_none() is None:
+            raise HTTPException(status_code=403, detail="审批人没有该金融资源的案件审批授权")
+
+
 @app.get("/runs/{run_id}/approvals")
 async def list_run_approvals(run_id: UUID, principal: Principal = Depends(get_principal), session: AsyncSession = Depends(get_session)):
     from agent_runtime.db import ApprovalBinding
@@ -1066,7 +1189,7 @@ async def revoke_approval(approval_id: UUID, principal: Principal = Depends(get_
 
 
 async def _decide_approval(approval_id: UUID, body: ApprovalRequest, principal: Principal, session: AsyncSession, approved: bool):
-    from agent_runtime.approval.service import ApprovalError, ApprovalService
+    from agent_runtime.approval.service import ApprovalError, ApprovalService, ApprovalStateChangedError
     from agent_runtime.auth import can_manage_run
     from agent_runtime.db import ApprovalBinding, RunRecord
     await _require_scope(principal, "approval:approve")
@@ -1078,9 +1201,18 @@ async def _decide_approval(approval_id: UUID, body: ApprovalRequest, principal: 
         raise HTTPException(status_code=403, detail="cannot approve this run")
     if principal.user_id == record.requested_by:
         raise HTTPException(status_code=403, detail="requester cannot approve own high-risk operation")
+    await _enforce_financial_approval_policy(
+        session, principal,
+        run_id=record.run_id,
+        tool_name=record.tool_name,
+        requester_user_id=record.requested_by,
+    )
     try:
         await ApprovalService().decide(session, tenant_id=principal.tenant_id, approval_id=str(approval_id),
                                        approved=approved, approver_id=principal.user_id, reason=body.reason)
+    except ApprovalStateChangedError as exc:
+        await session.commit()
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except ApprovalError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     from agent_runtime.outbox.commands import enqueue_command

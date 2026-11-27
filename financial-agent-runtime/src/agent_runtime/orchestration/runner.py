@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
-from uuid import uuid4
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
@@ -91,8 +90,9 @@ async def _await_child_termination(handle, grace: float, extra_wait: float) -> b
     except Exception:
         pass
     try:
-        await workflow.wait({handle}, timeout=max(0.001, extra_wait))
-        return True
+        done_wait, _ = await workflow.wait({handle}, timeout=max(0.001, extra_wait))
+        # workflow.wait 超时是正常返回，未完成的 handle 不能当作已终止。
+        return handle in done_wait
     except Exception:
         return False  # 仍未终止：保留 CANCEL_REQUESTED，靠 ParentClosePolicy.TERMINATE 兜底
 
@@ -140,7 +140,7 @@ async def execute_sub_agent_node(
             attempts=attempt,
             duration_ms=int((workflow.now() - started_at).total_seconds() * 1000),
             artifact_refs=summary.get("artifact_refs") or [],
-            source_event_ids=[str(uuid4())],
+            source_event_ids=[str(workflow.uuid4())],
             completed_at=workflow.now(),
         )
 
@@ -430,6 +430,6 @@ async def execute_sub_agent_node(
         attempts=attempt,
         duration_ms=duration_ms,
         artifact_refs=result_summary["artifact_refs"],
-        source_event_ids=[str(uuid4())],
+        source_event_ids=[str(workflow.uuid4())],
         completed_at=workflow.now(),
     )

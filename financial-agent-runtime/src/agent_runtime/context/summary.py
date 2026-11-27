@@ -4,8 +4,9 @@ The LLM call for summarization happens in a Temporal *activity*. Everything in
 this module is deterministic and safe to call from workflow code. Summaries are
 auxiliary context only — original audit events are never deleted or mutated.
 
-Idempotency: a summary for the same ``(run_id, source_event_end, version)`` maps
-to a stable idempotency key so retries never create duplicate versions.
+Idempotency: a summary for the same source events, model and prompt version maps
+to a stable key so retries never create duplicates, while upgrades or corrected
+events naturally produce a new key.
 """
 
 from __future__ import annotations
@@ -42,8 +43,21 @@ def summary_idempotency_key(
     run_id: str,
     source_event_end: int,
     version: int,
+    *,
+    source_event_ids: list[str] | None = None,
+    events: list[dict[str, Any]] | None = None,
+    model_version: str = "",
+    prompt_version: str = "",
 ) -> str:
-    raw = f"{tenant_id}:{run_id}:{source_event_end}:{version}"
+    """Stable key that also changes when source content or model/prompt changes."""
+    events_fingerprint = hashlib.sha256(
+        json.dumps(events or [], ensure_ascii=False, sort_keys=True, default=str).encode()
+    ).hexdigest()[:16]
+    raw = "|".join([
+        tenant_id, run_id, str(source_event_end), str(version),
+        ",".join(source_event_ids or []), events_fingerprint,
+        model_version, prompt_version,
+    ])
     return hashlib.sha256(raw.encode()).hexdigest()
 
 

@@ -120,9 +120,11 @@ async def list_run_telemetries(
     principal: Principal = Depends(get_principal),
     session: AsyncSession = Depends(get_session),
 ):
+    stmt = select(RunRecord).where(RunRecord.tenant_id == principal.tenant_id)
+    if "runs:read:tenant" not in principal.scopes:
+        stmt = stmt.where(RunRecord.user_id == principal.user_id)
     runs = list((await session.execute(
-        select(RunRecord).where(RunRecord.tenant_id == principal.tenant_id)
-        .order_by(RunRecord.created_at.desc()).limit(max(1, min(limit, 200)))
+        stmt.order_by(RunRecord.created_at.desc()).limit(max(1, min(limit, 200)))
     )).scalars())
     results = []
     for run in runs:
@@ -319,7 +321,10 @@ async def update_memory_record(
         updated = await update_memory(
             session, principal, record,
             title=body.title, content=body.content, memory_type=body.memory_type, scope=body.scope,
-            confidence=body.confidence, expires_at=body.expires_at, acl=body.acl,
+            confidence=body.confidence,
+            expires_at=body.expires_at if "expires_at" in body.model_fields_set
+            else (record.metadata_json or {}).get("expires_at"),
+            acl=body.acl,
         )
     except (PermissionError, ValueError) as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -362,10 +367,14 @@ async def list_tenant_checkpoints(
     principal: Principal = Depends(get_principal),
     session: AsyncSession = Depends(get_session),
 ):
-    rows = (await session.execute(
-        select(CheckpointRecord).where(CheckpointRecord.tenant_id == principal.tenant_id)
-        .order_by(CheckpointRecord.created_at.desc())
-    )).scalars()
+    stmt = (
+        select(CheckpointRecord)
+        .join(RunRecord, RunRecord.run_id == CheckpointRecord.run_id)
+        .where(CheckpointRecord.tenant_id == principal.tenant_id, RunRecord.tenant_id == principal.tenant_id)
+    )
+    if "runs:read:tenant" not in principal.scopes:
+        stmt = stmt.where(RunRecord.user_id == principal.user_id)
+    rows = (await session.execute(stmt.order_by(CheckpointRecord.created_at.desc()))).scalars()
     return [{
         "checkpoint_id": str(row.checkpoint_id), "run_id": str(row.run_id),
         "tenant_id": row.tenant_id, "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -380,10 +389,14 @@ async def list_tenant_worker_failures(
     principal: Principal = Depends(get_principal),
     session: AsyncSession = Depends(get_session),
 ):
-    rows = (await session.execute(
-        select(WorkerFailureRecord).where(WorkerFailureRecord.tenant_id == principal.tenant_id)
-        .order_by(WorkerFailureRecord.occurred_at.desc())
-    )).scalars()
+    stmt = (
+        select(WorkerFailureRecord)
+        .join(RunRecord, RunRecord.run_id == WorkerFailureRecord.run_id)
+        .where(WorkerFailureRecord.tenant_id == principal.tenant_id, RunRecord.tenant_id == principal.tenant_id)
+    )
+    if "runs:read:tenant" not in principal.scopes:
+        stmt = stmt.where(RunRecord.user_id == principal.user_id)
+    rows = (await session.execute(stmt.order_by(WorkerFailureRecord.occurred_at.desc()))).scalars()
     return [{
         "failure_id": str(row.failure_id), "run_id": str(row.run_id),
         "tenant_id": row.tenant_id, "worker_id": row.worker_id,

@@ -129,26 +129,53 @@ async def hybrid_search(
     ]
     bm25_ranking = [cid for cid, score in sorted(bm25_scores, key=lambda item: item[1], reverse=True) if score > 0][:candidate_k]
 
-    # 路 2：向量召回。按入库向量维度自动选择：
-    # 512 维 → 现有 TF-IDF（实时拟合，兼容旧数据）；其他维度（如 BGE-M3 1024）→ 调用同一 provider 编码查询。
-    sample_vector = chunks[0].vector or []
-    stored_dim = len(sample_vector)
-    if stored_dim == 512:
-        embedder = TfidfHashEmbedding()
-        embedder.fit([chunk.content for chunk in chunks])
-        query_vector = embedder.embed(query)
-        vector_scores = [
-            (str(chunk.chunk_id), cosine_similarity(query_vector, embedder.embed(chunk.content)))
-            for chunk in chunks
-        ]
-    else:
-        from agent_runtime.knowledge.embedding import get_embedder
-        embedder = get_embedder(dimension=stored_dim)
-        query_vector = embedder.embed(query)
-        vector_scores = [
-            (str(chunk.chunk_id), cosine_similarity(query_vector, chunk.vector or []))
-            for chunk in chunks
-        ]
+    # 路 2：向量召回。按每个 chunk 的存储向量维度选择编码方式：
+    # 512 维 → TF-IDF（查询时统一重算，保证与查询向量同一空间）；
+    # 其他维度 → 外部 provider（BGE-M3）。provider 不可用时该 chunk 跳过向量路，
+    # 不得用 TF-IDF 向量去匹配外部向量（向量空间不同会产出无意义分数）。
+    tfidf_embedder = TfidfHashEmbedding()
+    tfidf_embedder.fit([chunk.content for chunk in chunks])
+    tfidf_query_vector = tfidf_embedder.embed(query)
+
+    bge_query_vector = None
+    if any(len(chunk.vector or []) != 512 for chunk in chunks):
+        from agent_runtime.knowledge.embedding import BGEM3Embedding
+        import logging
+        provider = BGEM3Embedding()
+        if provider.enabled:
+            try:
+                candidate_vector = provider.embed(query)
+                # 维度必须与存储向量一致，否则视为 provider 配置漂移。
+                if len(candidate_vector) == provider.dimension:
+                    bge_query_vector = candidate_vector
+                else:
+                    logging.getLogger(__name__).warning(
+                        "BGE-M3 query vector dim %d != configured %d; skip vector recall",
+                        len(candidate_vector), provider.dimension,
+                    )
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "BGE-M3 query encode failed: %s: %s; skip vector recall",
+                    type(exc).__name__, exc,
+                )
+        else:
+            logging.getLogger(__name__).warning(
+                "knowledge chunks use an external embedding provider but it is not "
+                "configured; vector recall skipped, BM25 only"
+            )
+
+    vector_scores = []
+    for chunk in chunks:
+        cid = str(chunk.chunk_id)
+        stored = chunk.vector or []
+        dim = len(stored)
+        if dim == 512:
+            score = cosine_similarity(tfidf_query_vector, tfidf_embedder.embed(chunk.content))
+        elif bge_query_vector is not None and dim == len(bge_query_vector):
+            score = cosine_similarity(bge_query_vector, stored)
+        else:
+            continue
+        vector_scores.append((cid, score))
     vector_ranking = [cid for cid, score in sorted(vector_scores, key=lambda item: item[1], reverse=True) if score > 0][:candidate_k]
 
     # RRF 融合
@@ -164,7 +191,10 @@ async def hybrid_search(
     docs: dict = {}
     if doc_ids:
         docs = {row.document_id: row for row in (await session.execute(
-            select(KnowledgeDocumentRecord).where(KnowledgeDocumentRecord.document_id.in_(doc_ids))
+            select(KnowledgeDocumentRecord).where(
+                KnowledgeDocumentRecord.document_id.in_(doc_ids),
+                KnowledgeDocumentRecord.tenant_id == tenant_id,
+            )
         )).scalars()}
 
     candidates = []
@@ -201,10 +231,8 @@ async def hybrid_search(
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning(
-            "rerank failed: %s: %s", type(exc).__name__, exc
+            "rerank failed: %s: %s; fallback to RRF ranking", type(exc).__name__, exc
         )
-        if getattr(reranker, "enabled", False):
-            return []
         rerank_scores = None
 
     if rerank_scores is None:

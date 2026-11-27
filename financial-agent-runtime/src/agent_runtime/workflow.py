@@ -514,6 +514,12 @@ class AgentRunWorkflow:
             if workflow.patched("b7-checkpoint-restore-v1"):
                 contract = RestoreContract.model_validate(restore_contract_raw)
                 inject_restore_state(state, contract)
+                # A restored run only gets the remaining wall-clock budget.
+                restored_used = float(state.get("used_duration_seconds") or 0)
+                if restored_used > 0:
+                    deadline = start_time + timedelta(
+                        seconds=max(60, run_input.max_duration_seconds - restored_used)
+                    )
                 tool_calls = state["tool_calls"]
                 llm_calls = state["llm_calls"]
                 self._step = max(
@@ -525,10 +531,12 @@ class AgentRunWorkflow:
                 self._restore_contract = contract
                 token_input = int(state.get("token_input", 0) or 0)
                 token_output = int(state.get("token_output", 0) or 0)
+        # Workflow must never read live settings during replay; use a fixed
+        # default for histories created before this field was frozen.
         self._child_cancel_grace_seconds = (
             run_input.child_cancel_grace_seconds
             if getattr(run_input, "child_cancel_grace_seconds", None) is not None
-            else settings.orchestration_child_cancel_grace_seconds
+            else 30
         )
         watchdog_task: asyncio.Task | None = None
         try:
@@ -551,7 +559,7 @@ class AgentRunWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
             watchdog_task = asyncio.create_task(self._shutdown_watchdog(
-                run_id, run_input.tenant_id, start_time, run_input.max_duration_seconds,
+                run_id, run_input.tenant_id, start_time, (deadline - start_time).total_seconds(),
             ))
             await self._persist_telemetry(run_input, start_time, deadline, "初始化", 0, 0, 0, tool_calls, llm_calls)
             state["memory_context"] = await workflow.execute_activity(
@@ -596,12 +604,13 @@ class AgentRunWorkflow:
                         run_id, "SUCCEEDED", result=graph_result["result"], event_type="RUN_SUCCEEDED",
                     )
                 else:
-                    await self._set_status(
-                        run_id, "FAILED" if graph_status == "FAILED" else "CANCELLED",
-                        error="graph did not succeed", event_type=(
-                            "RUN_CANCELLED" if graph_status == "CANCELLED" else "RUN_FAILED"
-                        ),
-                    )
+                    run_status = {
+                        "FAILED": "FAILED", "CANCELLED": "CANCELLED", "TIMED_OUT": "TIMED_OUT",
+                    }.get(graph_status, "FAILED")
+                    event_type = {
+                        "FAILED": "RUN_FAILED", "CANCELLED": "RUN_CANCELLED", "TIMED_OUT": "RUN_TIMED_OUT",
+                    }.get(graph_status, "RUN_FAILED")
+                    await self._set_status(run_id, run_status, error="graph did not succeed", event_type=event_type)
                 return {"status": graph_status, "result": graph_result["result"]}
 
             while self._step < run_input.max_steps:
@@ -616,7 +625,7 @@ class AgentRunWorkflow:
                     return {"status": final_status}
 
                 elapsed = (workflow.now() - start_time).total_seconds()
-                if elapsed >= run_input.max_duration_seconds:
+                if elapsed >= (deadline - start_time).total_seconds():
                     self._request_shutdown("timeout")
                     self._deadline_reached = True
                     continue

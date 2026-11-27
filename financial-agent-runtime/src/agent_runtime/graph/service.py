@@ -20,13 +20,30 @@ from agent_runtime.graph.models import (
 )
 
 
+class GraphVersionConflict(Exception):
+    """Raised when the graph version changed since the caller read it."""
+
+
 async def upsert_definition(
     definition: GraphDefinition,
     validation: ValidationReport | None = None,
     planner_model: str | None = None,
+    expected_version: int | None = None,
 ) -> dict[str, Any]:
     async with session_for_tenant(definition.tenant_id) as session:
-        row = await session.get(TaskGraphRecord, definition.graph_id)
+        if expected_version is not None:
+            row = (await session.execute(
+                select(TaskGraphRecord).where(
+                    TaskGraphRecord.tenant_id == definition.tenant_id,
+                    TaskGraphRecord.graph_id == definition.graph_id,
+                ).with_for_update()
+            )).scalar_one_or_none()
+        else:
+            row = await session.get(TaskGraphRecord, definition.graph_id)
+        if expected_version is not None and row is not None and row.graph_version != expected_version:
+            raise GraphVersionConflict(
+                f"graph version changed: expected {expected_version}, found {row.graph_version}"
+            )
         payload = definition.model_dump(mode="json")
         if row is None:
             row = TaskGraphRecord(graph_id=definition.graph_id)

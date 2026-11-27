@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func, select
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func, select, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -820,9 +820,38 @@ engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
+async def _ensure_tenant_rls(conn) -> None:
+    """Install tenant RLS policies idempotently for every tenant-scoped table.
+
+    create_all never applies Alembic policies; without this, a freshly created
+    database would have all tables but no row-level isolation.
+    """
+    tenant_tables = sorted(
+        table.name for table in Base.metadata.tables.values()
+        if "tenant_id" in table.columns
+    )
+    for table in tenant_tables:
+        policy = f"tenant_isolation_{table}"
+        await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+        await conn.execute(text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
+        await conn.execute(text(f"DROP POLICY IF EXISTS {policy} ON {table}"))
+        await conn.execute(text(f"""
+            CREATE POLICY {policy} ON {table}
+            USING (
+                tenant_id = current_setting('app.tenant_id', true)
+                OR current_setting('app.system_context', true) IN ('outbox_dispatcher', 'identity_resolver')
+            )
+            WITH CHECK (
+                tenant_id = current_setting('app.tenant_id', true)
+                OR current_setting('app.system_context', true) IN ('outbox_dispatcher', 'identity_resolver')
+            )
+        """))
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _ensure_tenant_rls(conn)
 
 
 @asynccontextmanager

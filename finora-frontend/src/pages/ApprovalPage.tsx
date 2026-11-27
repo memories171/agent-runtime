@@ -4,6 +4,7 @@ import { Alert, Button, Descriptions, Input, Modal, Space, Table, Tag, Tooltip, 
 import { CheckOutlined, CloseOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api, isMockMode } from '../api';
 import { useAuth } from '../auth/AuthProvider';
+import { useApp } from '../state/AppContext';
 import { ApiUnavailable, DemoBanner, formatTime, shortId } from '../components/Ui';
 import { useAsyncData } from '../hooks/useAsyncData';
 import type { ApprovalActionEnvelope, ApprovalRecord, ApprovalStatus } from '../types';
@@ -96,9 +97,10 @@ const APPROVAL_READ_PERMISSIONS = new Set([
 
 export function ApprovalPage() {
   const auth = useAuth();
+  const { refreshToken } = useApp();
   const [reason, setReason] = useState('');
   const [feedback, setFeedback] = useState<string | null>(null);
-  const query = useAsyncData(() => api.listApprovals(), [auth.profile?.permissions?.join(',')]);
+  const query = useAsyncData(() => api.listApprovals(), [refreshToken, auth.profile?.permissions?.join(',')]);
   const approvals = query.data || [];
   const approvalOrder = useMemo(
     () => new Map(approvals.map((item, index) => [item.approval_id, index + 1])),

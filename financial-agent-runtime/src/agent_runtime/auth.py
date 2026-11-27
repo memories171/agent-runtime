@@ -200,6 +200,14 @@ def can_manage_run(principal: Principal, run_owner_id: str) -> bool:
     return principal.user_id == run_owner_id or "runs:manage:tenant" in principal.scopes
 
 
+def can_cancel_run(principal: Principal, run_owner_id: str) -> bool:
+    """Risk may stop any tenant Run without gaining full Run management."""
+    return (
+        can_manage_run(principal, run_owner_id)
+        or "runs:cancel:tenant" in principal.scopes
+    )
+
+
 def require_permission(principal: Principal, permission: str) -> None:
     if permission not in principal.permissions and permission not in principal.scopes:
         raise HTTPException(status_code=403, detail=f"permission required: {permission}")

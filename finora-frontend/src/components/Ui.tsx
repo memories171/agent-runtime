@@ -51,7 +51,7 @@ const pauseStateLabels: Record<PauseState, { label: string; color: string }> = {
 
 export function StatusTag({ status, pauseState }: { status: RunStatus; pauseState?: PauseState }) {
   if (pauseState && pauseState !== 'NONE') {
-    const p = pauseStateLabels[pauseState];
+    const p = pauseStateLabels[pauseState] || { label: String(pauseState), color: 'default' };
     return <Tag color={p.color}>{p.label}</Tag>;
   }
   const meta = runStatusMeta[status] || runStatusMeta.CREATED;
@@ -66,13 +66,13 @@ export function McpStatusTag({ status }: { status: 'HEALTHY' | 'DEGRADED' | 'UNH
 
 export function MemoryTypeTag({ type }: { type: MemoryType }) {
   const color: Record<MemoryType, string> = { WORKING: 'blue', EPISODIC: 'gold', SEMANTIC: 'purple', PROCEDURAL: 'cyan' };
-  return <Tag color={color[type]}>{type}</Tag>;
+  return <Tag color={color[type] || 'default'}>{type}</Tag>;
 }
 
 export function ScopeTag({ scope }: { scope: MemoryScope }) {
   const label: Record<MemoryScope, string> = { user: '个人级', team: '团队级', organization: '组织级' };
   const color: Record<MemoryScope, string> = { user: 'blue', team: 'gold', organization: 'green' };
-  return <Tag color={color[scope]}>{label[scope]}</Tag>;
+  return <Tag color={color[scope] || 'default'}>{label[scope] || String(scope)}</Tag>;
 }
 
 export function DecisionTag({ decision }: { decision: Decision }) {
@@ -122,7 +122,7 @@ export function skillLabel(skillId: string, name?: string, displayName?: string)
     'financial-research': '金融研究与财报分析', 'financial-reconciliation': '财务对账',
     'credit-risk-review': '信用风险复核',
   };
-  return displayName || labels[skillId] || name || skillId;
+  return labels[skillId] || displayName || name || skillId;
 }
 
 export function MetricCard({ title, value, suffix, hint, icon, tone = 'teal' }: {

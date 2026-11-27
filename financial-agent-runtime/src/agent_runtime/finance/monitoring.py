@@ -22,7 +22,16 @@ def detect_review_indicators(
 
     This is a demo rule set. It is not a legal AML assessment, regulatory threshold,
     customer risk decision, or substitute for an institution-approved monitoring engine.
+
+    Production use requires an explicit, approved opt-in.
     """
+    from agent_runtime.config import settings
+
+    if settings.is_production and not settings.finance_monitoring_production_rules:
+        raise RuntimeError(
+            "Demo transaction screening rules are disabled in production. "
+            "Set FINANCE_MONITORING_PRODUCTION_RULES=true with an approved reference."
+        )
     normalized = []
     for item in transactions:
         row = dict(item)

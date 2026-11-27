@@ -8,7 +8,7 @@ import {
 import { api } from '../api';
 import { useAsyncData } from '../hooks/useAsyncData';
 import { useApp } from '../state/AppContext';
-import { ApiUnavailable, DemoBanner, formatTime, riskLabel, shortId, StatusTag, toolLabel } from '../components/Ui';
+import { ApiUnavailable, DemoBanner, formatTime, riskLabel, shortId, skillLabel, StatusTag, toolLabel } from '../components/Ui';
 import type { AuditLog, ReviewCase, RunRecord } from '../types';
 
 const { Paragraph, Text, Title } = Typography;
@@ -233,18 +233,22 @@ export function SkillsPage() {
 
   return <>
     <DemoBanner note="金融技能与工具注册表为演示目录；详细管理能力见 MCP 服务 / 技能管理中心。" />
-    <Row gutter={[16, 16]}>
-      {(skillsQuery.data || []).map((skill) => <Col xs={24} md={12} xl={8} key={skill.skill_id}>
-        <Card className="capability-card" bordered={false}>
-          <div className="capability-icon"><BookOutlined /></div>
-          <Title level={5}>{skill.skill_id}</Title>
-          <Paragraph>{skill.description || '金融领域任务指引'}</Paragraph>
-          <Text type="secondary" className="mono-text">{skill.path || '技能注册表'}</Text>
-        </Card>
-      </Col>)}
-    </Row>
+    {skillsQuery.error
+      ? <ApiUnavailable error={skillsQuery.error} feature="金融技能" />
+      : <Row gutter={[16, 16]}>
+        {(skillsQuery.data || []).map((skill) => <Col xs={24} md={12} xl={8} key={skill.skill_id}>
+          <Card className="capability-card" bordered={false}>
+            <div className="capability-icon"><BookOutlined /></div>
+            <Title level={5}>{skillLabel(skill.skill_id, skill.name, skill.display_name)}</Title>
+            <Paragraph>{skill.description || '金融领域任务指引'}</Paragraph>
+            <Text type="secondary" className="mono-text">{skill.path || '技能注册表'}</Text>
+          </Card>
+        </Col>)}
+      </Row>}
     <Card className="panel-card table-card" bordered={false} title={<div className="card-title"><span>工具网关 · 工具注册表</span><Text type="secondary">运行时真实权限由后端校验</Text></div>}>
-      <Table rowKey="name" dataSource={tools} pagination={false} columns={columns} locale={{ emptyText: <Empty description="工具列表暂不可用" /> }} />
+      {toolsQuery.error
+        ? <ApiUnavailable error={toolsQuery.error} feature="工具注册表" />
+        : <Table rowKey="name" dataSource={tools} pagination={false} columns={columns} locale={{ emptyText: <Empty description="工具列表暂不可用" /> }} />}
     </Card>
   </>;
 }

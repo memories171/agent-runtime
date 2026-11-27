@@ -22,7 +22,12 @@ export function CreateRunModal({ open, onClose, onCreated }: {
   const displayUser = isMockMode ? identity.userId : (auth.profile?.user_id || '-');
 
   const submit = async () => {
-    const values = await form.validateFields();
+    let values: CreateValues;
+    try {
+      values = await form.validateFields();
+    } catch {
+      return;
+    }
     if (!canCreate) {
       notify('error', '当前角色没有 agent:execute 权限，无法创建 Agent 任务');
       return;
@@ -58,11 +63,13 @@ export function CreateRunModal({ open, onClose, onCreated }: {
           <Input.TextArea rows={5} placeholder="例如：对 ACC-DEMO-001 运行金融监测演示，解释规则命中交易并整理复核摘要。" />
         </Form.Item>
         <Form.Item label="关联技能" name="skill_ids">
-          <Select mode="multiple" placeholder="选择一个或多个技能"
-            options={(skills.data || []).map((skill) => ({
-              label: skillLabel(skill.skill_id, skill.name, skill.display_name),
-              value: skill.skill_id,
-            }))} />
+          {skills.error
+            ? <Alert type="error" showIcon message="技能列表加载失败" description={skills.error.message} />
+            : <Select mode="multiple" placeholder="选择一个或多个技能"
+              options={(skills.data || []).map((skill) => ({
+                label: skillLabel(skill.skill_id, skill.name, skill.display_name),
+                value: skill.skill_id,
+              }))} />}
         </Form.Item>
         <Form.Item label="使用 Task Graph 规划" name="graph_enabled" extra="开启后由现有模型生成 DAG 提案，经后端校验后并行执行；关闭则沿用线性 Agent Loop。">
           <Switch checkedChildren="DAG" unCheckedChildren="线性" />

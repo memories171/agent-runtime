@@ -62,6 +62,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setProfile(null);
         setApiTenant(null);
       },
+      onForbidden: (error) => {
+        setAuthError(error.message);
+      },
     });
     void (async () => {
       const isCallback = window.location.pathname === '/auth/callback';

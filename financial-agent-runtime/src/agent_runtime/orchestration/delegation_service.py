@@ -9,6 +9,7 @@ from sqlalchemy import or_, select, update
 
 from agent_runtime.auth import can_access_run
 from agent_runtime.contracts import (
+    TERMINAL_RUN_STATUSES,
     AgentTreeAnomaliesRead,
     AgentTreeNodeRead,
     AgentTreeRead,
@@ -159,7 +160,7 @@ class DelegationService:
             if by_workflow is not None:
                 raise CapabilityDenied("child_workflow_already_bound")
 
-        if parent.status in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+        if parent.status in TERMINAL_RUN_STATUSES:
             raise CapabilityDenied("parent_run_terminal")
         if child.run_kind != "SUB_AGENT":
             raise CapabilityDenied("invalid_child_run_kind")
@@ -174,6 +175,16 @@ class DelegationService:
         )
         now = _utc(datetime.now(timezone.utc))
         async with session_for_tenant(tenant_id) as session:
+            # Re-check under a row lock: the parent may have entered a terminal
+            # state between the earlier check and capability token issuance.
+            locked_parent = (await session.execute(
+                select(RunRecord.status).where(
+                    RunRecord.tenant_id == tenant_id,
+                    RunRecord.run_id == parent_run_id,
+                ).with_for_update()
+            )).scalar_one_or_none()
+            if locked_parent is None or locked_parent in TERMINAL_RUN_STATUSES:
+                raise CapabilityDenied("parent_run_terminal")
             row = DelegationRow(
                 delegation_id=uuid4(),
                 tenant_id=tenant_id,

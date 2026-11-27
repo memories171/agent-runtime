@@ -130,5 +130,5 @@ export async function clearUser(): Promise<void> {
 
 export async function signOut(): Promise<void> {
   await clearUser();
-  await getManager().signoutRedirect();
+  if (isOidcConfigured()) await getManager().signoutRedirect();
 }

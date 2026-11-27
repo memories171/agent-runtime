@@ -8,6 +8,7 @@ import {
   CheckSquareOutlined, RobotOutlined, SafetyCertificateOutlined, SettingOutlined, ThunderboltOutlined, UserOutlined,
 } from '@ant-design/icons';
 import { api, dataMode, identity, isMockMode, setDemoIdentity, setDemoTenant } from './api';
+import type { DemoRole } from './api';
 import { useAuth } from './auth/AuthProvider';
 import { AppContext } from './state/AppContext';
 import type { NotifyType } from './state/AppContext';
@@ -68,11 +69,24 @@ const pageTitle: Record<string, { title: string; subtitle: string }> = {
   audit: { title: '运行审计', subtitle: '保留原有金融审计日志视图。' },
 };
 
+const ROLE_PAGES: Record<DemoRole, Set<string>> = {
+  general_manager: new Set(['overview', 'knowledge', 'runs', 'mcp', 'memory', 'checkpoint', 'security', 'benchmark', 'audit']),
+  analyst: new Set(['overview', 'chat', 'knowledge', 'runs', 'mcp', 'memory', 'checkpoint', 'monitoring', 'cases', 'skills']),
+  risk_controller: new Set(['overview', 'runs', 'knowledge', 'checkpoint', 'approval', 'monitoring', 'cases', 'audit', 'benchmark']),
+};
+
+function deriveRole(permissions: string[]): DemoRole {
+  if (permissions.includes('platform:manage') || permissions.includes('user:manage')) return 'general_manager';
+  if (permissions.includes('approval:approve') || permissions.includes('financial:case:review')) return 'risk_controller';
+  return 'analyst';
+}
+
 export default function App() {
   const auth = useAuth();
   const [messageApi, contextHolder] = message.useMessage();
   const [collapsed, setCollapsed] = useState(false);
   const [activePage, setActivePage] = useState('overview');
+  const [demoRole, setDemoRole] = useState<DemoRole>('analyst');
   const [refreshToken, setRefreshToken] = useState(0);
   const [apiHealthy, setApiHealthy] = useState<boolean | null>(null);
 
@@ -93,9 +107,15 @@ export default function App() {
     return () => { active = false; };
   }, [refreshToken]);
 
-  const switchIdentity = useCallback((role: 'analyst' | 'compliance' | 'auditor') => {
-    if (isMockMode) setDemoIdentity(role);
-  }, []);
+  const switchIdentity = useCallback((role: DemoRole) => {
+    if (isMockMode) {
+      setDemoIdentity(role);
+      setDemoRole(role);
+      requestRefresh();
+      return;
+    }
+    notify('warning', 'API 模式身份由 OIDC 登录决定，请在身份提供商处切换后重新登录。');
+  }, [notify, requestRefresh]);
 
   const switchTenant = useCallback((tenantId: string) => {
     if (isMockMode) {
@@ -110,9 +130,9 @@ export default function App() {
 
   const headerMenu: MenuProps['items'] = isMockMode
     ? [
+        { key: 'identity-general_manager', icon: <SafetyCertificateOutlined />, label: '切换为总经理（manager-01）' },
         { key: 'identity-analyst', icon: <UserOutlined />, label: '切换为分析人员（analyst-01）' },
-        { key: 'identity-compliance', icon: <SafetyCertificateOutlined />, label: '切换为合规复核员（compliance-01）' },
-        { key: 'identity-auditor', icon: <AuditOutlined />, label: '切换为审计观察员（auditor-01）' },
+        { key: 'identity-risk_controller', icon: <AuditOutlined />, label: '切换为风控复核员（risk-01）' },
         { type: 'divider' },
         { key: 'refresh', icon: <ReloadOutlined />, label: '刷新数据' },
         { key: 'reset-demo', icon: <ReloadOutlined />, label: '重置本地 DEMO 数据' },
@@ -132,10 +152,14 @@ export default function App() {
   const handleHeaderMenu = ({ key }: { key: string }) => {
     if (key.startsWith('tenant:')) {
       switchTenant(key.slice('tenant:'.length));
-    } else if (key === 'identity-analyst' || key === 'identity-compliance' || key === 'identity-auditor') {
-      const role = key === 'identity-compliance' ? 'compliance' : key === 'identity-auditor' ? 'auditor' : 'analyst';
+    } else if (key === 'identity-general_manager' || key === 'identity-analyst' || key === 'identity-risk_controller') {
+      const role: DemoRole = key === 'identity-general_manager'
+        ? 'general_manager'
+        : key === 'identity-risk_controller'
+          ? 'risk_controller'
+          : 'analyst';
       switchIdentity(role);
-      notify('info', `已切换为 ${role} Demo Identity（非真实认证）`);
+      notify('info', `已切换为 ${identity.displayName}（非真实认证）`);
       requestRefresh();
     } else if (key === 'logout') {
       void auth.signOut();
@@ -150,9 +174,24 @@ export default function App() {
     }
   };
 
+  const currentRole = isMockMode
+    ? demoRole
+    : deriveRole(auth.profile?.permissions || []);
+  const allowedPages = ROLE_PAGES[currentRole];
+  const visibleNavItems = (navItems || []).map((group) => {
+    if (!group || group.type !== 'group' || !Array.isArray(group.children)) return group;
+    const children = group.children.filter((item) => item && typeof item === 'object' && 'key' in item && allowedPages.has(String(item.key)));
+    return children.length ? { ...group, children } : null;
+  }).filter(Boolean);
+
+  useEffect(() => {
+    if (!allowedPages.has(activePage)) setActivePage('overview');
+  }, [activePage, allowedPages]);
+
   const currentPage = pageTitle[activePage] || pageTitle.overview;
 
   const renderPage = () => {
+    if (!allowedPages.has(activePage)) return <OverviewPage onOpenRuns={() => setActivePage('runs')} />;
     if (activePage === 'chat') return <ChatWorkspace onOpenMemory={() => setActivePage('memory')} onOpenCheckpoint={() => setActivePage('checkpoint')} />;
     if (activePage === 'knowledge') return <KnowledgePage />;
     if (activePage === 'runs') return <RunsPage />;
@@ -184,7 +223,7 @@ export default function App() {
           <div className="tenant-avatar">DB</div>
           {!collapsed && <div className="tenant-copy"><small>当前数据租户</small><b>{isMockMode ? identity.tenantId : (auth.currentTenant || '-')} <span>⌄</span></b></div>}
         </div>
-        <Menu className="side-menu" theme="dark" mode="inline" selectedKeys={[activePage]} items={navItems}
+        <Menu className="side-menu" theme="dark" mode="inline" selectedKeys={[activePage]} items={visibleNavItems}
           onClick={({ key }) => setActivePage(key)} inlineCollapsed={collapsed} />
         <div className="sider-bottom">
           <div className="sider-status"><span className="live-dot" />{!collapsed && <><span>{isMockMode ? '本地演示环境' : '开发环境'}</span><Tag color={isMockMode ? 'processing' : 'green'}>{isMockMode ? 'MOCK' : 'API'}</Tag></>}</div>

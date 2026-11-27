@@ -145,9 +145,12 @@ export function BenchmarkPage() {
     { title: '说明', dataIndex: 'note', ellipsis: true },
   ];
 
+  if (benchmarkQuery.error) return <>
+    {isMockMode && <DemoBanner note="模型、Harness、成功率、恢复率、安全指标、延迟与成本均为 DEMO / MOCK 合成实验数据。" />}
+    <ApiUnavailable error={benchmarkQuery.error} feature="Benchmark 实验" />
+  </>;
   return <>
     {isMockMode && <DemoBanner note="模型、Harness、成功率、恢复率、安全指标、延迟与成本均为 DEMO / MOCK 合成实验数据。" />}
-    {benchmarkQuery.error && <ApiUnavailable error={benchmarkQuery.error} feature="Benchmark 实验" />}
     <Card className="panel-card filter-card" bordered={false}>
       <Space wrap className="filter-row">
         <Select value={modelFilter} onChange={setModelFilter} style={{ width: 170 }} options={[{ label: '全部 Model', value: 'ALL' }, ...models.map((value) => ({ label: value, value }))]} />
@@ -170,7 +173,7 @@ export function BenchmarkPage() {
           key: 'matrix', label: 'Model × Harness 矩阵与对比',
           children: <>
             {isRealData
-              ? <Alert className="inline-alert" type="info" showIcon message="数据来自真实 Run 聚合" description={`任务成功率 = 终态 SUCCEEDED 占比；恢复成功率 = worker 故障中 RECOVERED 占比（无故障样本为 0%）；成本 = 总估算成本 ÷ 成功数。样本 ${filtered.reduce((sum, item) => sum + item.runs, 0)} 个 Run。`} />
+              ? <Alert className="inline-alert" type="info" showIcon message="数据来自真实 Run 聚合" description={`任务成功率 = 终态 SUCCEEDED 占比；完成率 = SUCCEEDED 或 FAILED 占比；恢复成功率 = worker 故障中 RECOVERED 占比（无故障样本为 0%）；未授权访问率与注入成功率未被真实测量，显示为 —。样本 ${filtered.reduce((sum, item) => sum + item.runs, 0)} 个 Run。`} />
               : <Alert className="inline-alert" type="warning" showIcon message="演示结果不是模型性能证明" description={`未授权访问率 ${percent(avgUnauthorized)}、注入成功率与恢复成功率均为合成值；P95 ${avgP95} ms。请勿用于模型验收或监管报告。`} />}
             <Card size="small" title="热力矩阵 · Task Success Rate" bordered={false}>
               <EChart option={heatmapOption} height={280} />

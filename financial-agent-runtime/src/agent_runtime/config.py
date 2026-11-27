@@ -101,6 +101,28 @@ class Settings(BaseSettings):
         )
 
     def validate_runtime_config(self) -> None:
+        if self.is_production and self.auto_create_db:
+            raise RuntimeError(
+                "production requires reviewed Alembic migrations: set AUTO_CREATE_DB=false"
+            )
+        if self.mcp_tls_required:
+            import json
+            from urllib.parse import urlsplit
+
+            try:
+                server_configs = json.loads(self.mcp_servers_json or "[]")
+            except json.JSONDecodeError:
+                server_configs = []
+            if isinstance(server_configs, list):
+                for server in server_configs:
+                    if not isinstance(server, dict):
+                        continue
+                    url = str(server.get("url") or "")
+                    if url and urlsplit(url).scheme != "https":
+                        raise RuntimeError(
+                            "MCP_TLS_REQUIRED: MCP server URL must use HTTPS "
+                            f"(server={server.get('name', '?')})"
+                        )
         mode = self.auth_mode.strip().lower()
         if mode not in {"dev", "oidc"}:
             raise RuntimeError(f"AUTH_MODE must be 'dev' or 'oidc', got {self.auth_mode!r}")

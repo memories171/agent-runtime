@@ -75,26 +75,27 @@ def reimport_realm(args: argparse.Namespace) -> None:
 
 
 def seed_database(args: argparse.Namespace) -> None:
-    sql = f"""
+    # Bind CLI values as psql variables; never interpolate them into SQL text.
+    sql = """
 INSERT INTO tenants (tenant_id, display_name, status)
-VALUES ('{args.tenant_id}', '{args.tenant_name}', 'active')
+VALUES (:'tenant_id', :'tenant_name', 'active')
 ON CONFLICT DO NOTHING;
 
 INSERT INTO organizations (organization_id, tenant_id, name, status)
-VALUES ('{args.org_id}', '{args.tenant_id}', '{args.org_name}', 'active')
+VALUES (:'org_id', :'tenant_id', :'org_name', 'active')
 ON CONFLICT DO NOTHING;
 
 INSERT INTO users (user_id, display_name, email, status)
-VALUES ('{args.user_id}', '{args.user_id}', '{args.email or args.user_id + "@example.com"}', 'active')
+VALUES (:'user_id', :'user_id', :'email', 'active')
 ON CONFLICT DO NOTHING;
 
 INSERT INTO tenant_memberships (membership_id, tenant_id, user_id, organization_id, status)
-VALUES (gen_random_uuid(), '{args.tenant_id}', '{args.user_id}', '{args.org_id}', 'active')
+VALUES (gen_random_uuid(), :'tenant_id', :'user_id', :'org_id', 'active')
 ON CONFLICT (tenant_id, user_id)
-DO UPDATE SET status = 'active', organization_id = '{args.org_id}';
+DO UPDATE SET status = 'active', organization_id = :'org_id';
 
 INSERT INTO user_roles (user_role_id, tenant_id, user_id, role_id, granted_by)
-VALUES (gen_random_uuid(), '{args.tenant_id}', '{args.user_id}', '{args.role}', 'seed')
+VALUES (gen_random_uuid(), :'tenant_id', :'user_id', :'role', 'seed')
 ON CONFLICT (tenant_id, user_id, role_id) DO NOTHING;
 """
     with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False, encoding="utf-8") as handle:
@@ -103,7 +104,15 @@ ON CONFLICT (tenant_id, user_id, role_id) DO NOTHING;
     try:
         subprocess.run(["docker", "compose", "cp", str(local_path), "postgres:/tmp/finora_seed_user.sql"], cwd=ROOT, check=True)
         subprocess.run(
-            ["docker", "compose", "exec", "-T", "postgres", "psql", "-U", "agent", "-d", "agent_runtime", "-f", "/tmp/finora_seed_user.sql"],
+            ["docker", "compose", "exec", "-T", "postgres", "psql", "-U", "agent", "-d", "agent_runtime",
+             "-v", f"tenant_id={args.tenant_id}",
+             "-v", f"tenant_name={args.tenant_name}",
+             "-v", f"org_id={args.org_id}",
+             "-v", f"org_name={args.org_name}",
+             "-v", f"user_id={args.user_id}",
+             "-v", f"email={args.email or args.user_id + '@example.com'}",
+             "-v", f"role={args.role}",
+             "-f", "/tmp/finora_seed_user.sql"],
             cwd=ROOT,
             check=True,
         )

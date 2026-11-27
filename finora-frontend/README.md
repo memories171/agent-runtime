@@ -97,6 +97,28 @@ npm run build
 
 产物位于 `dist/`，可以部署到 Nginx、静态网站托管服务或任意前端 Hosting。纯 Mock 模式部署时不需要配置 API 代理。
 
+### API 模式的生产代理规则
+
+前端统一使用 `/api` 作为代理挂载点，但后端有两类真实路径，代理必须按以下规则转发：
+
+- `/api/v1/*`（auth、context、graph 等）**保留完整路径**转发到后端；
+- `/api/*`（Runs、Skills、Finance 等业务接口）**去掉 `/api` 前缀**后转发到后端根路径。
+
+Nginx 示例（第二个 `proxy_pass` 末尾的 `/` 用于去掉 `/api/` 前缀）：
+
+```nginx
+location /api/v1/ {
+    proxy_pass http://backend:8000;
+    proxy_set_header Host $host;
+}
+location /api/ {
+    proxy_pass http://backend:8000/;
+    proxy_set_header Host $host;
+}
+```
+
+若托管服务不支持路径重写，请勿使用 API 模式；仅使用默认 Mock 模式不需要上述配置。
+
 ## 金融安全提示
 
 本项目使用合成数据，用于前端交互演示和开发验证。交易规则命中仅代表待人工复核提示，不构成 AML、欺诈或违法认定；不能用于真实客户决策、资金操作或监管申报。

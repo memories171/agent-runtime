@@ -29,7 +29,7 @@ export function ChatWorkspace({ onOpenMemory, onOpenCheckpoint }: {
   onOpenMemory: () => void;
   onOpenCheckpoint: () => void;
 }) {
-  const { notify } = useApp();
+  const { notify, refreshToken } = useApp();
   const [conversations, setConversations] = useState<ChatConversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -131,14 +131,17 @@ export function ChatWorkspace({ onOpenMemory, onOpenCheckpoint }: {
       const nextId = activeIdRef.current && list.some((x) => x.conversation_id === activeIdRef.current)
         ? activeIdRef.current
         : (list[0]?.conversation_id || null);
-      activeIdRef.current = nextId;
-      setActiveId(nextId);
+      if (activeIdRef.current !== nextId) {
+        activeIdRef.current = nextId;
+        setMessages([]);
+        setActiveId(nextId);
+      }
     } catch (error) {
       notify('error', error instanceof Error ? error.message : '加载会话失败');
     } finally {
       setLoading(false);
     }
-  }, [notify]);
+  }, [notify, refreshToken]);
 
   const loadMessages = useCallback(async (conversationId: string) => {
     try {
@@ -201,7 +204,9 @@ export function ChatWorkspace({ onOpenMemory, onOpenCheckpoint }: {
             .filter((tool) => tool.phase === 'result')
             .map((tool) => ({ tool: tool.tool, status: 'ok', result: tool.result })),
         });
-        setMessages((prev) => [...prev, saved]);
+        if (activeIdRef.current === conversationId) {
+          setMessages((prev) => [...prev, saved]);
+        }
         notify('info', '已停止生成，输出的部分内容已保存');
       } catch (error) {
         notify('error', error instanceof Error ? error.message : '保存停止内容失败');

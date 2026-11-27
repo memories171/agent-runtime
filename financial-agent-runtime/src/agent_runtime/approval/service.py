@@ -24,6 +24,14 @@ class InvalidApprovalError(ApprovalError):
         super().__init__(detail, status_code=409)
 
 
+class ApprovalStateChangedError(InvalidApprovalError):
+    """A terminal state change was staged; callers must commit before returning.
+
+    Raised after EXPIRED/INVALIDATED and its audit event are written to the
+    session. Without an explicit commit, session teardown rolls the change back.
+    """
+
+
 class ApprovalService:
     """复用现有 RunEvent 审计；为审批决策增加强绑定状态机。"""
 
@@ -102,7 +110,7 @@ class ApprovalService:
             )
             if outcome.rowcount == 1:
                 await append_event(session, record.run_id, tenant_id, "APPROVAL_EXPIRED", {"approval_id": approval_id})
-            raise InvalidApprovalError("approval expired")
+            raise ApprovalStateChangedError("approval expired")
 
         target_status = "APPROVED" if approved else "REJECTED"
         outcome = await session.execute(
@@ -124,6 +132,7 @@ class ApprovalService:
             "approval_id": approval_id, "approver_user_id": approver_id,
             "approved": approved, "reason": reason,
         })
+        await session.refresh(record)
         return record
 
     async def validate_binding(
@@ -153,21 +162,24 @@ class ApprovalService:
         candidates = list(records)
         if not candidates:
             raise InvalidApprovalError("no approved binding for this tool call")
+        state_changed = False
         for record in candidates:
             if record.tool_name != tool_name or record.target_resource_id != target_resource_id:
                 continue
             if record.canonical_arguments_hash != args_hash:
-                await self._invalidate(session, record, "arguments changed")
+                state_changed |= await self._invalidate(session, record, "arguments changed")
                 continue
             if record.policy_version != policy_version:
-                await self._invalidate(session, record, "policy version changed")
+                state_changed |= await self._invalidate(session, record, "policy version changed")
                 continue
             if record.expires_at <= datetime.now(timezone.utc):
-                await self._invalidate(session, record, "approval expired")
+                state_changed |= await self._invalidate(session, record, "approval expired")
                 continue
             if approver_id and record.approver_id != approver_id:
                 continue
             return record
+        if state_changed:
+            raise ApprovalStateChangedError("approval binding invalid for this operation")
         raise InvalidApprovalError("approval binding invalid for this operation")
 
     async def consume(self, session: Any, *, tenant_id: str, approval_id: str, version: int) -> None:
@@ -198,9 +210,9 @@ class ApprovalService:
             raise InvalidApprovalError("approval already consumed or version conflict")
         await append_event(session, record.run_id, tenant_id, "APPROVAL_CONSUMED", {"approval_id": approval_id})
 
-    async def _invalidate(self, session: Any, record: ApprovalBinding, reason: str) -> None:
+    async def _invalidate(self, session: Any, record: ApprovalBinding, reason: str) -> bool:
         if record.approval_status in {"CONSUMED", "INVALIDATED"}:
-            return
+            return False
         outcome = await session.execute(
             update(ApprovalBinding)
             .where(
@@ -212,6 +224,7 @@ class ApprovalService:
         )
         if outcome.rowcount == 1:
             await append_event(session, record.run_id, record.tenant_id, "APPROVAL_INVALIDATED", {"reason": reason})
+        return outcome.rowcount == 1
 
     async def revoke(self, session: Any, *, tenant_id: str, approval_id: str) -> None:
         from sqlalchemy import select

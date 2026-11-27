@@ -128,12 +128,15 @@ async def aggregate_from_runs(
     工具准确率=有工具调用记录的 Run 占比，成本/恢复率取真实遥测聚合。"""
     # 只聚合已进入终态的 Run：Benchmark 衡量的是已完成任务的真实表现，
     # 卡在 RUNNING 的陈旧测试 Run 不代表有效评测样本。
+    stmt = select(RunRecord).where(
+        RunRecord.tenant_id == principal.tenant_id,
+        RunRecord.deleted_at.is_(None),
+        RunRecord.status.in_(["SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"]),
+    )
+    if "runs:read:tenant" not in principal.scopes:
+        stmt = stmt.where(RunRecord.user_id == principal.user_id)
     runs = list((await session.execute(
-        select(RunRecord).where(
-            RunRecord.tenant_id == principal.tenant_id,
-            RunRecord.deleted_at.is_(None),
-            RunRecord.status.in_(["SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"]),
-        ).order_by(RunRecord.created_at.desc()).limit(body.limit)
+        stmt.order_by(RunRecord.created_at.desc()).limit(body.limit)
     )).scalars())
     if not runs:
         raise HTTPException(status_code=400, detail="当前租户没有可聚合的 Run；请先创建任务。")
@@ -161,7 +164,9 @@ async def aggregate_from_runs(
     for (model, harness), items in groups.items():
         total = len(items)
         succeeded = sum(1 for run, _ in items if run.status == "SUCCEEDED")
-        completed = sum(1 for run, _ in items if run.status in {"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"})
+        # Completion = the run produced a definitive outcome (success or
+        # failure). Cancelled/timed-out runs are not completed tasks.
+        completed = sum(1 for run, _ in items if run.status in {"SUCCEEDED", "FAILED"})
         with_tools = sum(1 for _, tel in items if tel and tel.tool_calls_json)
         group_failures = [f for run, _ in items for f in failures_by_run.get(run.run_id, [])]
         recovered = sum(1 for f in group_failures if f.recovery_status == "RECOVERED")
@@ -196,8 +201,10 @@ async def aggregate_from_runs(
             # 恢复率取真实 worker_failures 事件：RECOVERED / 该组总故障数；无故障样本时为 0。
             recovery_success_rate=recovery_rate,
             tool_call_accuracy=with_tools / total,
-            unauthorized_access_rate=0.0,
-            prompt_injection_success_rate=0.0,
+            # Security rates are not derived from any measured signal in this
+            # aggregate; NULL means "not measured" instead of a fake 0.
+            unauthorized_access_rate=None,
+            prompt_injection_success_rate=None,
             avg_duration_seconds=sum(durations) / total,
             p95_latency_ms=p95,
             token_cost_usd=avg_cost * total,
@@ -205,7 +212,10 @@ async def aggregate_from_runs(
             status="COMPLETED",
             started_at=now,
             created_at=now,
-            metadata_json={"source": "agent_runs_aggregate", "tokens": tokens, "limit": body.limit},
+            metadata_json={
+                "source": "agent_runs_aggregate", "tokens": tokens, "limit": body.limit,
+                "not_measured": ["unauthorized_access_rate", "prompt_injection_success_rate"],
+            },
         )
         session.add(experiment)
         created.append(experiment)

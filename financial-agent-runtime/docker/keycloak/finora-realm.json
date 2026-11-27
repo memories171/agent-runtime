@@ -18,15 +18,13 @@
       "serviceAccountsEnabled": false,
       "fullScopeAllowed": true,
       "redirectUris": [
-        "https://localhost:5173/auth/callback",
-        "https://192.168.110.91:5173/auth/callback"
+        "https://localhost:5173/auth/callback"
       ],
       "webOrigins": [
-        "https://localhost:5173",
-        "https://192.168.110.91:5173"
+        "https://localhost:5173"
       ],
       "attributes": {
-        "post.logout.redirect.uris": "https://localhost:5173,https://192.168.110.91:5173",
+        "post.logout.redirect.uris": "https://localhost:5173",
         "pkce.code.challenge.method": "S256"
       },
       "defaultClientScopes": [
@@ -117,11 +115,32 @@
       ]
     }
   ],
+  "components": {
+    "org.keycloak.userprofile.UserProfileProvider": [
+      {
+        "name": "declarative-user-profile",
+        "providerId": "declarative-user-profile",
+        "config": {
+          "kc.user.profile.config": [
+            "{\"attributes\":[{\"name\":\"username\",\"displayName\":\"${username}\",\"validations\":{\"length\":{\"min\":3,\"max\":255},\"username-prohibited-characters\":{},\"up-username-not-idn-homograph\":{}},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"email\",\"displayName\":\"${email}\",\"validations\":{\"email\":{},\"length\":{\"max\":255}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"firstName\",\"displayName\":\"${firstName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"lastName\",\"displayName\":\"${lastName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"tenant_id\",\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false},{\"name\":\"organization_id\",\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\"]},\"multivalued\":false}],\"groups\":[{\"name\":\"user-metadata\",\"displayHeader\":\"User metadata\",\"displayDescription\":\"Attributes, which refer to user metadata\"}]}"
+          ]
+        }
+      }
+    ]
+  },
   "roles": {
     "realm": [
       {
         "name": "analyst",
-        "description": "Can create runs and read authorized financial resources"
+        "description": "业务分析人员：发起任务，创建复核案件，不审批"
+      },
+      {
+        "name": "general_manager",
+        "description": "总经理：治理配置与全局指标，不参与个案审批"
+      },
+      {
+        "name": "risk_controller",
+        "description": "风控：独立复核案件与高风险操作，不发起业务任务"
       },
       {
         "name": "auditor",
@@ -158,6 +177,58 @@
       },
       "realmRoles": [
         "analyst"
+      ]
+    },
+    {
+      "username": "manager-01",
+      "enabled": true,
+      "email": "manager-01@example.com",
+      "emailVerified": true,
+      "firstName": "General",
+      "lastName": "Manager",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Finora@2026",
+          "temporary": false
+        }
+      ],
+      "attributes": {
+        "tenant_id": [
+          "demo-bank"
+        ],
+        "organization_id": [
+          "demo-org"
+        ]
+      },
+      "realmRoles": [
+        "general_manager"
+      ]
+    },
+    {
+      "username": "risk-01",
+      "enabled": true,
+      "email": "risk-01@example.com",
+      "emailVerified": true,
+      "firstName": "Risk",
+      "lastName": "Controller",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Finora@2026",
+          "temporary": false
+        }
+      ],
+      "attributes": {
+        "tenant_id": [
+          "demo-bank"
+        ],
+        "organization_id": [
+          "demo-org"
+        ]
+      },
+      "realmRoles": [
+        "risk_controller"
       ]
     },
     {

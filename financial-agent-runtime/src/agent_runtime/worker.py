@@ -59,30 +59,44 @@ from agent_runtime.workflow import AgentRunWorkflow
 from agent_runtime.tools.registry import configure_mcp_servers
 
 
+_RECONNECT_DEDUP_WINDOW_SECONDS = 300
+
+
 async def record_worker_reconnect(boot_id: str) -> int:
     """Worker 启动时扫描其接管的运行中任务，记录 Temporal 驱动的恢复事件。
 
     不创建/重启 Workflow，也不从 Checkpoint 手动执行 step；仅记录业务恢复审计。
     fencing token 使用启动时间戳的 epoch 秒，保证后续 worker 的写入覆盖旧值。
+
+    多副本 Worker 并发启动时，用 Run 行锁 + 时间窗幂等，确保同一 Run 在窗口内
+    只写一次恢复事件，避免每个副本都制造一套虚假的 WORKER_FAILED 审计。
     """
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     from uuid import uuid4
 
-    from agent_runtime.db import WorkerFailureRecord, append_event
+    from agent_runtime.db import RunEvent, WorkerFailureRecord, append_event
 
-    fencing_token = int(datetime.now(timezone.utc).timestamp())
+    now = datetime.now(timezone.utc)
+    fencing_token = int(now.timestamp())
     recovered = 0
     async with system_session(SessionLocal, "outbox_dispatcher") as session:
         rows = (await session.execute(
-            select(RunRecord).where(RunRecord.status.in_(["RUNNING", "WAITING_INPUT", "WAITING_APPROVAL", "PAUSED"]))
+            select(RunRecord).where(
+                RunRecord.status.in_(["RUNNING", "WAITING_INPUT", "WAITING_APPROVAL", "PAUSED"]),
+                RunRecord.deleted_at.is_(None),
+            ).with_for_update()
         )).scalars()
         for run in list(rows):
-            idem = f"{run.run_id}:worker-reconnect:{boot_id}"
-            existing = (await session.execute(
-                select(WorkerFailureRecord).where(WorkerFailureRecord.idempotency_key == idem)
+            recent = (await session.execute(
+                select(RunEvent.event_id).where(
+                    RunEvent.run_id == run.run_id,
+                    RunEvent.event_type == "WORKER_RECONNECTED",
+                    RunEvent.created_at >= now - timedelta(seconds=_RECONNECT_DEDUP_WINDOW_SECONDS),
+                ).limit(1)
             )).scalar_one_or_none()
-            if existing is not None:
+            if recent is not None:
                 continue
+            idem = f"{run.run_id}:worker-reconnect:{boot_id}"
             session.add(WorkerFailureRecord(
                 failure_id=uuid4(),
                 run_id=run.run_id,
@@ -95,8 +109,8 @@ async def record_worker_reconnect(boot_id: str) -> int:
                 recovery_position="temporal-history-replay",
                 idempotency_key=idem,
                 duplicate_protection=True,
-                recovery_started_at=datetime.now(timezone.utc),
-                recovery_completed_at=datetime.now(timezone.utc),
+                recovery_started_at=now,
+                recovery_completed_at=now,
                 recovery_attempt=1,
                 fencing_token=fencing_token,
             ))

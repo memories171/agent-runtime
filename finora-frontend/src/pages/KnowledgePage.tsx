@@ -93,7 +93,6 @@ export function KnowledgePage() {
       notify('success', `${editingId ? '已更新文档' : '已解析入库'}：${result.chunk_count} 个切分块`);
       closeDocumentModal();
       requestRefresh();
-      await load();
     } catch (error) {
       notify('error', error instanceof Error ? error.message : (editingId ? '更新失败' : '入库失败'));
     }
@@ -104,7 +103,6 @@ export function KnowledgePage() {
       await api.deleteKnowledgeDocument(documentId);
       notify('success', '文档已删除');
       requestRefresh();
-      await load();
     } catch (error) {
       notify('error', error instanceof Error ? error.message : '删除失败');
     }

@@ -56,7 +56,7 @@ export interface ToolCallRecord {
   call_id: string;
   tool: string;
   server: string;
-  status: 'SUCCESS' | 'FAILED' | 'PENDING';
+  status: 'CREATED' | 'DISPATCHED' | 'CONFIRMED' | 'FAILED' | 'UNKNOWN' | 'RECONCILIATION_REQUIRED' | 'RESTORED_REUSED' | 'SUCCESS' | 'PENDING';
   started_at: string;
   duration_ms: number;
   risk_level: string;
@@ -170,7 +170,7 @@ export interface MemoryRecord {
   content: string;
   source_run_id: string | null;
   owner: string;
-  tenant_id: string;
+  tenant_id?: string;
   confidence: number;
   created_at: string;
   updated_at: string;
@@ -591,8 +591,8 @@ export interface ContextMetrics {
   demo?: boolean;
 }
 
-export type GraphStatus = 'PLANNING' | 'READY' | 'RUNNING' | 'WAITING' | 'PAUSED' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
-export type NodeStatus = 'PENDING' | 'READY' | 'RUNNING' | 'WAITING_APPROVAL' | 'WAITING_INPUT' | 'RETRY_WAIT' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'SKIPPED';
+export type GraphStatus = 'PLANNING' | 'READY' | 'RUNNING' | 'WAITING' | 'PAUSED' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT';
+export type NodeStatus = 'PENDING' | 'READY' | 'RUNNING' | 'WAITING_APPROVAL' | 'WAITING_INPUT' | 'RETRY_WAIT' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'SKIPPED' | 'TIMED_OUT';
 
 export interface TaskGraphNode {
   node_id: string;

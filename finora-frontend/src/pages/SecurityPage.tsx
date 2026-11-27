@@ -14,17 +14,16 @@ import type {
 const { Text, Paragraph } = Typography;
 
 export function SecurityPage() {
-  const { identity, switchIdentity, switchTenant, refreshToken, requestRefresh, notify } = useApp();
+  const { identity, isMockMode, switchIdentity, switchTenant, refreshToken, notify } = useApp();
   const [selectedUser, setSelectedUser] = useState<UserRecord | null>(null);
   const [selectedRole, setSelectedRole] = useState<RoleRecord | null>(null);
   const securityQuery = useAsyncData(() => api.getSecuritySnapshot(), [refreshToken]);
   const toolsQuery = useAsyncData(() => api.listMcpTools(), [refreshToken]);
   const snapshot = securityQuery.data;
 
-  const changeIdentity = (role: 'analyst' | 'compliance' | 'auditor') => {
+  const changeIdentity = (role: 'general_manager' | 'analyst' | 'risk_controller') => {
     switchIdentity(role);
-    notify('info', '已切换演示身份（非真实认证）');
-    requestRefresh();
+    if (isMockMode) notify('info', '已切换演示身份（非真实认证）');
   };
 
   const tenantColumns: TableColumnsType<TenantRecord> = [
@@ -33,7 +32,10 @@ export function SecurityPage() {
     { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'ACTIVE' ? 'success' : 'error'}>{value}</Tag> },
     { title: '用户数', dataIndex: 'users' },
     { title: '创建时间', dataIndex: 'created_at', render: formatTime },
-    { title: '', key: 'action', render: (_, record) => <Button type="link" onClick={() => { switchTenant(record.tenant_id); requestRefresh(); notify('info', `当前数据租户已切换为 ${record.tenant_id}（演示）`); }}>切换数据租户</Button> },
+    { title: '', key: 'action', render: (_, record) => <Button type="link" onClick={() => {
+      switchTenant(record.tenant_id);
+      if (isMockMode) notify('info', `当前数据租户已切换为 ${record.tenant_id}（演示）`);
+    }}>切换数据租户</Button> },
   ];
 
   const userColumns: TableColumnsType<UserRecord> = [
@@ -118,9 +120,9 @@ export function SecurityPage() {
       <div className="identity-demo-bar">
         <div><Text strong>演示身份</Text><Text type="secondary"> 当前：{identity.tenantId} / {identity.userId}（{identity.displayName}）</Text></div>
         <Space wrap>
+          <Button size="small" onClick={() => changeIdentity('general_manager')}>总经理</Button>
           <Button size="small" onClick={() => changeIdentity('analyst')}>分析人员</Button>
-          <Button size="small" onClick={() => changeIdentity('compliance')}>合规复核员</Button>
-          <Button size="small" onClick={() => changeIdentity('auditor')}>审计观察员</Button>
+          <Button size="small" onClick={() => changeIdentity('risk_controller')}>风控复核员</Button>
         </Space>
       </div>
     </Card>

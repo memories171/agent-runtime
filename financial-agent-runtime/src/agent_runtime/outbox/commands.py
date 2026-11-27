@@ -77,9 +77,12 @@ async def _mark_failed(session: Any, outbox_id: UUID, exc: Exception) -> None:
         row.status = "DEAD"
         run = await session.get(RunRecord, row.run_id)
         if run is not None:
-            run.status = "FAILED"
-            run.error = "signal_command_dead_lettered"
-            await append_event(session, run.run_id, row.tenant_id, "OUTBOX_DEAD_LETTERED", {"error": row.last_error})
+            if run.status not in {"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"}:
+                run.status = "FAILED"
+                run.error = "signal_command_dead_lettered"
+            await append_event(session, run.run_id, row.tenant_id, "OUTBOX_DEAD_LETTERED", {
+                "error": row.last_error, "run_status": run.status,
+            })
     else:
         row.status = "PENDING"
         row.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=min(60, 2 ** min(row.attempts, 6)))
@@ -114,6 +117,16 @@ async def dispatch_commands_once(client: Client, session_factory: Any) -> int:
 
     dispatched = 0
     for item in claimed:
+        # 命令领取后、真正派发前，Run 可能已被取消；在同一系统事务中复核。
+        async with system_session(session_factory, "outbox_dispatcher") as check_session:
+            run_row = await check_session.get(RunRecord, UUID(item["run_id"]))
+            outbox_row = await check_session.get(WorkflowOutbox, item["outbox_id"])
+            if run_row is None or run_row.status == "CANCELLED" or run_row.deleted_at is not None:
+                if outbox_row is not None:
+                    outbox_row.status = "CANCELLED"
+                    outbox_row.lease_until = None
+                await check_session.commit()
+                continue
         workflow_id = f"agent-run/{item['tenant_id']}/{item['run_id']}"
         try:
             handle = client.get_workflow_handle(workflow_id)
@@ -149,7 +162,11 @@ async def dispatch_commands_once(client: Client, session_factory: Any) -> int:
         except Exception as exc:
             async with system_session(session_factory, "outbox_dispatcher") as session:
                 message = str(exc).lower()
-                if "already completed" in message or "not found" in message or "workflow execution" in message and "completed" in message:
+                workflow_missing = "workflow execution" in message and "not found" in message
+                infra_error = any(token in message for token in (
+                    "namespace", "task queue", "connection", "unavailable", "timeout",
+                ))
+                if "already completed" in message or (workflow_missing and not infra_error):
                     # Workflow reached a terminal state before the signal could be delivered.
                     # Do not retry forever; record a terminal skipped state.
                     row = await session.get(WorkflowOutbox, item["outbox_id"])

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_runtime.context.artifacts import ArtifactRef, artifact_object_ref, check_artifact_access
 from agent_runtime.context.pack import CONTEXT_PACK_SCHEMA_VERSION, ContextPack
 from agent_runtime.context.summary import (
+    SUMMARY_SYSTEM_PROMPT,
     SummaryRequest,
     content_hash,
     summary_idempotency_key,
@@ -99,7 +100,13 @@ class ContextPersistence:
         """Insert a summary idempotently. Returns the persisted summary record."""
         from agent_runtime.db import ContextSummaryRecord
 
-        key = summary_idempotency_key(request.tenant_id, request.run_id, request.source_event_end, request.version)
+        key = summary_idempotency_key(
+            request.tenant_id, request.run_id, request.source_event_end, request.version,
+            source_event_ids=request.source_event_ids,
+            events=request.events,
+            model_version=request.model_version,
+            prompt_version=SUMMARY_SYSTEM_PROMPT,
+        )
         existing = (
             await session.execute(
                 select(ContextSummaryRecord).where(
